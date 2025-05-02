@@ -42,14 +42,14 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Add CORS middleware
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "student-assistant-frontend-production.up.railway.app").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["https://student-assistant-frontend-production.up.railway.app"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # Configuration
 USER_DATA_DIR = "user_data"
