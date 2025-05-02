@@ -11,3 +11,4 @@ fastapi
      langchain-community
      faiss-cpu
      sentence-transformers
+     PyJWT
