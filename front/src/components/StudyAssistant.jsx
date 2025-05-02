@@ -25,8 +25,7 @@ const StudyAssistant = ({ selectedLecture, setView, token }) => {
     setLoading(true);
     setError('');
     try {
-      const response = await axios.post(
-        '${process.env.REACT_APP_API_BASE_URL}/study',
+        const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/study`,
         { task, lecture_name: selectedLecture, question: customQuestion },
         { headers: { Authorization: `Bearer ${token}` } }
       );

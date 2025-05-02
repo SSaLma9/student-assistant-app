@@ -13,7 +13,7 @@ const CourseManager = ({ setView, setSelectedCourse, token }) => {
     const fetchCourses = async () => {
       setLoading(true);
       try {
-        const response = await axios.get('${process.env.REACT_APP_API_BASE_URL}/courses', {
+        const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/courses`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         setCourses(response.data.courses || []);
@@ -31,8 +31,7 @@ const CourseManager = ({ setView, setSelectedCourse, token }) => {
     setLoading(true);
     setError('');
     try {
-      await axios.post(
-        '${process.env.REACT_APP_API_BASE_URL}/courses',
+      await axios.post(`${process.env.REACT_APP_API_BASE_URL}/courses`,
         { course_name: courseName },
         { headers: { Authorization: `Bearer ${token}` } }
       );
