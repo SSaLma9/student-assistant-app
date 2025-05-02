@@ -1,14 +1,13 @@
 fastapi
-     uvicorn
-     python-jose[cryptography]
-     python-dotenv
-     groq
-     python-multipart
-     passlib[bcrypt]
-     PyPDF2
-     langchain
-     langchain-groq
-     langchain-community
-     faiss-cpu
-     sentence-transformers
-     PyJWT
+uvicorn
+PyJWT
+python-dotenv
+groq
+python-multipart
+passlib[bcrypt]
+PyPDF2
+langchain
+langchain-groq
+langchain-community
+faiss-cpu
+sentence-transformers
