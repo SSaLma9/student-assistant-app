@@ -1,0 +1,197 @@
+import React, { useState } from 'react';
+import axios from 'axios';
+import { toast } from 'react-toastify';
+import { ArrowLeftIcon } from '@heroicons/react/24/solid';
+
+const ExamMode = ({ selectedLecture, setView, token }) => {
+  const [examType, setExamType] = useState('MCQs');
+  const [difficulty, setDifficulty] = useState('Easy');
+  const [questions, setQuestions] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [answers, setAnswers] = useState({});
+  const [feedback, setFeedback] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const examTypes = ['MCQs', 'Essay Questions'];
+  const difficulties = ['Easy', 'Medium', 'Hard'];
+
+  const handleGenerateExam = async () => {
+    if (!selectedLecture) {
+      setError('Please select a lecture first');
+      toast.error('Please select a lecture first');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const response = await axios.post(
+        'http://localhost:8000/exam',
+        { lecture_name: selectedLecture, exam_type: examType, difficulty },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setQuestions(response.data.questions || []);
+      setCurrentIndex(0);
+      setAnswers({});
+      setFeedback('');
+      toast.success('Exam generated successfully!');
+    } catch (err) {
+      setError(err.response?.data?.error || 'Failed to generate exam');
+      toast.error(err.response?.data?.error || 'Failed to generate exam');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAnswerSubmit = async (questionId, answer) => {
+    if (!answer) {
+      toast.error('Please provide an answer');
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await axios.post(
+        'http://localhost:8000/exam/grade',
+        { question_id: questionId, answer },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setFeedback(response.data.feedback);
+      toast.success('Answer submitted successfully!');
+    } catch (err) {
+      toast.error(err.response?.data?.error || 'Failed to grade answer');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const currentQuestion = questions[currentIndex];
+
+  return (
+    <div className="bg-white p-8 rounded-xl shadow-lg animate-fade-in">
+      <div className="flex items-center mb-6">
+        <button
+          onClick={() => setView('lectures')}
+          className="text-indigo-600 hover:text-indigo-800 mr-4"
+        >
+          <ArrowLeftIcon className="h-6 w-6" />
+        </button>
+        <h2 className="text-2xl font-bold text-gray-800">Exam Mode for {selectedLecture}</h2>
+      </div>
+      {error && <p className="text-red-500 mb-4">{error}</p>}
+      <div className="space-y-6 mb-8">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Exam Type</label>
+            <select
+              value={examType}
+              onChange={(e) => setExamType(e.target.value)}
+              className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            >
+              {examTypes.map((type) => (
+                <option key={type} value={type}>{type}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Difficulty</label>
+            <select
+              value={difficulty}
+              onChange={(e) => setDifficulty(e.target.value)}
+              className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            >
+              {difficulties.map((diff) => (
+                <option key={diff} value={diff}>{diff}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+        <button
+          onClick={handleGenerateExam}
+          disabled={loading || !selectedLecture}
+          className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading || !selectedLecture ? 'opacity-50 cursor-not-allowed' : ''}`}
+        >
+          {loading ? (
+            <svg className="animate-spin h-5 w-5 mr-2 text-white" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+            </svg>
+          ) : null}
+          Generate Exam
+        </button>
+      </div>
+      {questions.length > 0 && currentQuestion && (
+        <div className="space-y-6">
+          <h3 className="text-xl font-semibold text-gray-800">
+            Question {currentIndex + 1} of {questions.length}
+          </h3>
+          <div className="bg-blue-50 p-6 rounded-lg shadow">
+            <p className="text-lg font-medium text-gray-800 mb-4">{currentQuestion.question}</p>
+            {currentQuestion.type === 'mcq' && currentQuestion.options && (
+              <div className="space-y-2">
+                {currentQuestion.options.map((option, idx) => (
+                  <label key={idx} className="flex items-center space-x-2">
+                    <input
+                      type="radio"
+                      name={`question-${currentQuestion.id}`}
+                      value={option}
+                      checked={answers[currentQuestion.id] === option}
+                      onChange={(e) => setAnswers({ ...answers, [currentQuestion.id]: e.target.value })}
+                      className="h-4 w-4 text-indigo-600"
+                    />
+                    <span>{option}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+            {currentQuestion.type === 'essay' && (
+              <textarea
+                value={answers[currentQuestion.id] || ''}
+                onChange={(e) => setAnswers({ ...answers, [currentQuestion.id]: e.target.value })}
+                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                placeholder="Write your essay answer here..."
+                rows="6"
+              />
+            )}
+          </div>
+          <button
+            onClick={() => handleAnswerSubmit(currentQuestion.id, answers[currentQuestion.id] || '')}
+            disabled={loading}
+            className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            {loading ? (
+              <svg className="animate-spin h-5 w-5 mr-2 text-white" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+              </svg>
+            ) : null}
+            Submit Answer
+          </button>
+          {feedback && (
+            <div className="bg-green-50 p-6 rounded-lg">
+              <h3 className="text-lg font-semibold text-gray-800 mb-2">Feedback</h3>
+              <p className="text-gray-700 whitespace-pre-wrap">{feedback}</p>
+            </div>
+          )}
+          <div className="flex justify-between">
+            <button
+              onClick={() => setCurrentIndex(currentIndex - 1)}
+              disabled={currentIndex === 0}
+              className={`bg-gray-600 text-white py-2 px-4 rounded-lg ${currentIndex === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
+            >
+              Previous
+            </button>
+            <button
+              onClick={() => setCurrentIndex(currentIndex + 1)}
+              disabled={currentIndex === questions.length - 1}
+              className={`bg-gray-600 text-white py-2 px-4 rounded-lg ${currentIndex === questions.length - 1 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default ExamMode;

@@ -1,0 +1,10 @@
+{
+    "courses": {
+        "cloud": [
+            {
+                "name": "lec1",
+                "path": "user_data\\salma\\lectures\\lec1.pdf"
+            }
+        ]
+    }
+}
