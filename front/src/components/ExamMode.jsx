@@ -26,7 +26,7 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
     setError('');
     try {
       const response = await axios.post(
-        'http://localhost:8000/exam',
+        '${process.env.REACT_APP_API_BASE_URL}/exam',
         { lecture_name: selectedLecture, exam_type: examType, difficulty },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -51,7 +51,7 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
     setLoading(true);
     try {
       const response = await axios.post(
-        'http://localhost:8000/exam/grade',
+        '${process.env.REACT_APP_API_BASE_URL}/exam/grade',
         { question_id: questionId, answer },
         { headers: { Authorization: `Bearer ${token}` } }
       );

@@ -14,7 +14,7 @@ const Login = ({ onLogin }) => {
     setLoading(true);
     try {
       const endpoint = isRegister ? '/register' : '/login';
-      const response = await axios.post(`http://localhost:8000${endpoint}`, {
+      const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}${endpoint}`, {
         username,
         password
       });

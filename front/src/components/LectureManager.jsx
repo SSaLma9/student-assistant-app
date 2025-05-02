@@ -15,7 +15,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     const fetchLectures = async () => {
       setLoading(true);
       try {
-        const response = await axios.get(`http://localhost:8000/lectures/${selectedCourse}`, {
+        const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         setLectures(response.data.lectures || []);
@@ -43,7 +43,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     formData.append('file', file);
 
     try {
-      await axios.post('http://localhost:8000/lectures', formData, {
+        await axios.post(`${process.env.REACT_APP_API_BASE_URL}/lectures`, formData, {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'multipart/form-data'
