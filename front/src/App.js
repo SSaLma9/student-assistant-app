@@ -57,7 +57,7 @@ const App = () => {
         <nav className="bg-indigo-600 text-white p-4 shadow-lg">
           <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center">
             <h1 className="text-xl font-bold mb-2 sm:mb-0">Student Assistant</h1>
-            <div className="flex flex-col sm:flex-row items-center space-y-2 sm:space-y-0 sm:space-x-4">
+            <div className="flex flex-row flex-wrap items-center gap-2 sm:gap-4">
               <span className="text-sm">Welcome, {username}</span>
               <button onClick={() => setView('dashboard')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
                 Dashboard
