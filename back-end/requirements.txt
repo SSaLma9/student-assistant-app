@@ -11,3 +11,4 @@ langchain-groq
 langchain-community
 faiss-cpu
 sentence-transformers
+langchain-huggingface
