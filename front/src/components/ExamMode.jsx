@@ -25,7 +25,7 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
     setLoading(true);
     setError('');
     try {
-        const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/exam`, 
+      const response = await axios.post(`${process.env.REACT_APP_API_URL}/exam`, 
         { lecture_name: selectedLecture, exam_type: examType, difficulty },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -49,8 +49,8 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
     }
     setLoading(true);
     try {
-        const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/exam/grade`,
-        {question_id: questionId, answer },
+      const response = await axios.post(`${process.env.REACT_APP_API_URL}/exam/grade`,
+        { question_id: questionId, answer },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       setFeedback(response.data.feedback);
@@ -65,7 +65,7 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
   const currentQuestion = questions[currentIndex];
 
   return (
-    <div className="bg-white p-8 rounded-xl shadow-lg animate-fade-in">
+    <div className="bg-white p-4 sm:p-6 rounded-xl shadow-lg animate-fade-in">
       <div className="flex items-center mb-6">
         <button
           onClick={() => setView('lectures')}
@@ -73,40 +73,38 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
         >
           <ArrowLeftIcon className="h-6 w-6" />
         </button>
-        <h2 className="text-2xl font-bold text-gray-800">Exam Mode for {selectedLecture}</h2>
+        <h2 className="text-xl sm:text-2xl font-bold text-gray-800">Exam Mode for {selectedLecture}</h2>
       </div>
-      {error && <p className="text-red-500 mb-4">{error}</p>}
-      <div className="space-y-6 mb-8">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700">Exam Type</label>
-            <select
-              value={examType}
-              onChange={(e) => setExamType(e.target.value)}
-              className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              {examTypes.map((type) => (
-                <option key={type} value={type}>{type}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700">Difficulty</label>
-            <select
-              value={difficulty}
-              onChange={(e) => setDifficulty(e.target.value)}
-              className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              {difficulties.map((diff) => (
-                <option key={diff} value={diff}>{diff}</option>
-              ))}
-            </select>
-          </div>
+      {error && <p className="text-red-500 mb-4 text-sm sm:text-base">{error}</p>}
+      <div className="space-y-6 mb-6 sm:space-y-0 sm:grid sm:grid-cols-2 sm:gap-4">
+        <div>
+          <label className="block text-sm sm:text-base font-medium text-gray-700">Exam Type</label>
+          <select
+            value={examType}
+            onChange={(e) => setExamType(e.target.value)}
+            className="mt-1 w-full p-3 sm:p-4 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm sm:text-base"
+          >
+            {examTypes.map((type) => (
+              <option key={type} value={type}>{type}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-sm sm:text-base font-medium text-gray-700">Difficulty</label>
+          <select
+            value={difficulty}
+            onChange={(e) => setDifficulty(e.target.value)}
+            className="mt-1 w-full p-3 sm:p-4 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm sm:text-base"
+          >
+            {difficulties.map((diff) => (
+              <option key={diff} value={diff}>{diff}</option>
+            ))}
+          </select>
         </div>
         <button
           onClick={handleGenerateExam}
           disabled={loading || !selectedLecture}
-          className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading || !selectedLecture ? 'opacity-50 cursor-not-allowed' : ''}`}
+          className="w-full bg-indigo-600 text-white p-3 sm:p-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 active:bg-indigo-800 disabled:bg-indigo-300 text-sm sm:text-base font-medium"
         >
           {loading ? (
             <svg className="animate-spin h-5 w-5 mr-2 text-white" viewBox="0 0 24 24">
@@ -119,11 +117,11 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
       </div>
       {questions.length > 0 && currentQuestion && (
         <div className="space-y-6">
-          <h3 className="text-xl font-semibold text-gray-800">
+          <h3 className="text-xl sm:text-2xl font-semibold text-gray-800">
             Question {currentIndex + 1} of {questions.length}
           </h3>
-          <div className="bg-blue-50 p-6 rounded-lg shadow">
-            <p className="text-lg font-medium text-gray-800 mb-4">{currentQuestion.question}</p>
+          <div className="bg-blue-50 p-4 sm:p-6 rounded-lg shadow overflow-y-auto max-h-[50vh] sm:max-h-[60vh]">
+            <p className="text-lg sm:text-xl font-medium text-gray-800 mb-4">{currentQuestion.question}</p>
             {currentQuestion.type === 'mcq' && currentQuestion.options && (
               <div className="space-y-2">
                 {currentQuestion.options.map((option, idx) => (
@@ -134,9 +132,9 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
                       value={option}
                       checked={answers[currentQuestion.id] === option}
                       onChange={(e) => setAnswers({ ...answers, [currentQuestion.id]: e.target.value })}
-                      className="h-4 w-4 text-indigo-600"
+                      className="h-4 w-4 sm:h-5 sm:w-5 text-indigo-600"
                     />
-                    <span>{option}</span>
+                    <span className="text-sm sm:text-base">{option}</span>
                   </label>
                 ))}
               </div>
@@ -145,7 +143,7 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
               <textarea
                 value={answers[currentQuestion.id] || ''}
                 onChange={(e) => setAnswers({ ...answers, [currentQuestion.id]: e.target.value })}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+                className="w-full p-3 sm:p-4 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 text-sm sm:text-base"
                 placeholder="Write your essay answer here..."
                 rows="6"
               />
@@ -154,7 +152,7 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
           <button
             onClick={() => handleAnswerSubmit(currentQuestion.id, answers[currentQuestion.id] || '')}
             disabled={loading}
-            className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            className="w-full bg-indigo-600 text-white p-3 sm:p-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 active:bg-indigo-800 disabled:bg-indigo-300 text-sm sm:text-base font-medium"
           >
             {loading ? (
               <svg className="animate-spin h-5 w-5 mr-2 text-white" viewBox="0 0 24 24">
@@ -165,23 +163,23 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
             Submit Answer
           </button>
           {feedback && (
-            <div className="bg-green-50 p-6 rounded-lg">
-              <h3 className="text-lg font-semibold text-gray-800 mb-2">Feedback</h3>
-              <p className="text-gray-700 whitespace-pre-wrap">{feedback}</p>
+            <div className="bg-green-50 p-4 sm:p-6 rounded-lg overflow-y-auto max-h-[40vh] sm:max-h-[50vh]">
+              <h3 className="text-lg sm:text-xl font-semibold text-gray-800 mb-2">Feedback</h3>
+              <p className="text-gray-700 whitespace-pre-wrap text-sm sm:text-base">{feedback}</p>
             </div>
           )}
-          <div className="flex justify-between">
+          <div className="flex flex-col sm:flex-row justify-between space-y-4 sm:space-y-0 sm:space-x-4">
             <button
               onClick={() => setCurrentIndex(currentIndex - 1)}
               disabled={currentIndex === 0}
-              className={`bg-gray-600 text-white py-2 px-4 rounded-lg ${currentIndex === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
+              className={`w-full sm:w-auto bg-gray-600 text-white p-3 sm:p-4 rounded-lg ${currentIndex === 0 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
             >
               Previous
             </button>
             <button
               onClick={() => setCurrentIndex(currentIndex + 1)}
               disabled={currentIndex === questions.length - 1}
-              className={`bg-gray-600 text-white py-2 px-4 rounded-lg ${currentIndex === questions.length - 1 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
+              className={`w-full sm:w-auto bg-gray-600 text-white p-3 sm:p-4 rounded-lg ${currentIndex === questions.length - 1 ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
             >
               Next
             </button>
