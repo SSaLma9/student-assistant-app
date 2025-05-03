@@ -25,7 +25,7 @@ const StudyAssistant = ({ selectedLecture, setView, token }) => {
     setLoading(true);
     setError('');
     try {
-      const response = await axios.post(`${process.env.REACT_APP_API_URL}/study`,
+        const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/study`,
         { task, lecture_name: selectedLecture, question: customQuestion },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -43,23 +43,24 @@ const StudyAssistant = ({ selectedLecture, setView, token }) => {
   };
 
   return (
-    <div className="card">
-      <div className="header">
+    <div className="bg-white p-6 sm:p-8 rounded-xl shadow-lg animate-fade-in">
+      <div className="flex items-center mb-4 sm:mb-6">
         <button
           onClick={() => setView('lectures')}
-          className="back-button"
+          className="text-indigo-600 hover:text-indigo-800 mr-2 sm:mr-4"
         >
-          <ArrowLeftIcon />
+          <ArrowLeftIcon className="h-5 sm:h-6 w-5 sm:w-6" />
         </button>
-        <h2 className="header-title">Study Assistant for {selectedLecture}</h2>
+        <h2 className="text-xl sm:text-2xl font-bold text-gray-800">Study Assistant for {selectedLecture}</h2>
       </div>
-      {error && <p className="error-text">{error}</p>}
-      <div>
-        <div className="form-group">
-          <label className="form-label">Select Study Task</label>
+      {error && <p className="text-red-500 mb-2 sm:mb-4">{error}</p>}
+      <div className="space-y-4 sm:space-y-6">
+        <div>
+          <label className="block text-sm font-medium text-gray-700">Select Study Task</label>
           <select
             value={task}
             onChange={(e) => setTask(e.target.value)}
+            className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
           >
             {tasks.map((t) => (
               <option key={t} value={t}>{t}</option>
@@ -67,29 +68,34 @@ const StudyAssistant = ({ selectedLecture, setView, token }) => {
           </select>
         </div>
         {task === 'Custom Question' && (
-          <div className="form-group">
-            <label className="form-label">Your Question</label>
+          <div>
+            <label className="block text-sm font-medium text-gray-700">Your Question</label>
             <textarea
               value={customQuestion}
               onChange={(e) => setCustomQuestion(e.target.value)}
+              className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
               placeholder="Type your question here..."
               rows="4"
             />
           </div>
         )}
-        <button onClick={handleGenerate} disabled={loading || !selectedLecture}>
+        <button
+          onClick={handleGenerate}
+          disabled={loading || !selectedLecture}
+          className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading || !selectedLecture ? 'opacity-50 cursor-not-allowed' : ''}`}
+        >
           {loading ? (
-            <svg className="spinner" viewBox="0 0 24 24">
-              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" style={{ opacity: 0.25 }} />
-              <path fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" style={{ opacity: 0.75 }} />
+            <svg className="animate-spin h-4 sm:h-5 w-4 sm:w-5 mr-1 sm:mr-2 text-white" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
             </svg>
           ) : null}
           Generate Content
         </button>
         {content && (
-          <div className="content-box mt-10">
-            <h3 className="content-title">Generated Content</h3>
-            <p className="content-text">{content}</p>
+          <div className="bg-gray-100 p-4 sm:p-6 rounded-lg">
+            <h3 className="text-lg font-semibold text-gray-800 mb-2 sm:mb-4">Generated Content</h3>
+            <p className="text-gray-700 whitespace-pre-wrap">{content}</p>
           </div>
         )}
       </div>
