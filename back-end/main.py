@@ -57,7 +57,7 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 # Initialize embedding model globally
-embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+embeddings_model = HuggingFaceEmbeddings( model_name="./models/sentence-transformers_all-MiniLM-L6-v2")
 
 # Database setup
 def init_db():
