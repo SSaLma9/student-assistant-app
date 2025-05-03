@@ -52,36 +52,36 @@ const App = () => {
   };
 
   return (
-    <div className="app-container">
+    <div className="min-h-screen">
       {view !== 'login' && (
-        <nav className="nav-bar">
-          <div className="nav-content">
-            <h1 className="nav-title">Student Assistant</h1>
-            <div className="nav-items">
-              <span className="nav-username">Welcome, {username}</span>
-              <button onClick={() => setView('dashboard')} className="nav-button">
+        <nav className="bg-indigo-600 text-white p-4 shadow-lg">
+          <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-center">
+            <h1 className="text-xl font-bold mb-2 sm:mb-0">Student Assistant</h1>
+            <div className="flex flex-col sm:flex-row items-center space-y-2 sm:space-y-0 sm:space-x-4">
+              <span className="text-sm">Welcome, {username}</span>
+              <button onClick={() => setView('dashboard')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
                 Dashboard
               </button>
-              <button onClick={() => setView('courses')} className="nav-button">
+              <button onClick={() => setView('courses')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
                 Courses
               </button>
-              <button onClick={() => setView('lectures')} className="nav-button">
+              <button onClick={() => setView('lectures')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
                 Lectures
               </button>
-              <button onClick={() => setView('study')} className="nav-button">
+              <button onClick={() => setView('study')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
                 Study
               </button>
-              <button onClick={() => setView('exam')} className="nav-button">
+              <button onClick={() => setView('exam')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
                 Exam
               </button>
-              <button onClick={handleLogout} className="nav-button logout-button">
+              <button onClick={handleLogout} className="hover:bg-red-600 px-3 py-2 rounded transition">
                 Logout
               </button>
             </div>
           </div>
         </nav>
       )}
-      <main className="main-content">
+      <main className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
         {renderView()}
       </main>
       <ToastContainer position="top-right" autoClose={3000} hideProgressBar={false} />
