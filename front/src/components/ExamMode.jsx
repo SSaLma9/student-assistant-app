@@ -17,26 +17,43 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
   const difficulties = ['Easy', 'Medium', 'Hard'];
 
   const handleGenerateExam = async () => {
-    if (!selectedLecture) {
-      setError('Please select a lecture first');
-      toast.error('Please select a lecture first');
+    // Validate inputs
+    if (!selectedLecture || typeof selectedLecture !== 'string' || selectedLecture.trim() === '') {
+      setError('Please select a valid lecture first');
+      toast.error('Please select a valid lecture first');
       return;
     }
+    if (!token) {
+      setError('Authentication token is missing. Please log in again.');
+      toast.error('Authentication token is missing. Please log in again.');
+      return;
+    }
+    if (!process.env.REACT_APP_API_BASE_URL) {
+      setError('API base URL is not configured. Please contact support.');
+      toast.error('API base URL is not configured. Please contact support.');
+      return;
+    }
+
     setLoading(true);
     setError('');
     try {
-        const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/exam`, 
+      const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/exam`, 
         { lecture_name: selectedLecture, exam_type: examType, difficulty },
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      setQuestions(response.data.questions || []);
+      if (!response.data || !Array.isArray(response.data.questions)) {
+        throw new Error('Invalid response from server: Questions not found');
+      }
+      setQuestions(response.data.questions);
       setCurrentIndex(0);
       setAnswers({});
       setFeedback('');
       toast.success('Exam generated successfully!');
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to generate exam');
-      toast.error(err.response?.data?.error || 'Failed to generate exam');
+      console.error('Error generating exam:', err);
+      const errorMessage = err.response?.data?.error || err.message || 'Failed to generate exam';
+      setError(errorMessage);
+      toast.error(errorMessage);
     } finally {
       setLoading(false);
     }
@@ -49,8 +66,8 @@ const ExamMode = ({ selectedLecture, setView, token }) => {
     }
     setLoading(true);
     try {
-        const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/exam/grade`,
-        {question_id: questionId, answer },
+      const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}/exam/grade`,
+        { question_id: questionId, answer },
         { headers: { Authorization: `Bearer ${token}` } }
       );
       setFeedback(response.data.feedback);
