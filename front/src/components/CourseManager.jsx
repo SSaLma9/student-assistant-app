@@ -13,7 +13,7 @@ const CourseManager = ({ setView, setSelectedCourse, token }) => {
     const fetchCourses = async () => {
       setLoading(true);
       try {
-        const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/courses`, {
+        const response = await axios.get(`${process.env.REACT_APP_API_URL}/courses`, {
           headers: { Authorization: `Bearer ${token}` }
         });
         setCourses(response.data.courses || []);
@@ -31,7 +31,7 @@ const CourseManager = ({ setView, setSelectedCourse, token }) => {
     setLoading(true);
     setError('');
     try {
-      await axios.post(`${process.env.REACT_APP_API_BASE_URL}/courses`,
+      await axios.post(`${process.env.REACT_APP_API_URL}/courses`,
         { course_name: courseName },
         { headers: { Authorization: `Bearer ${token}` } }
       );
@@ -52,7 +52,7 @@ const CourseManager = ({ setView, setSelectedCourse, token }) => {
   };
 
   return (
-    <div className="bg-white p-8 rounded-xl shadow-lg animate-fade-in">
+    <div className="bg-white p-4 sm:p-6 rounded-xl shadow-lg animate-fade-in">
       <div className="flex items-center mb-6">
         <button
           onClick={() => setView('dashboard')}
@@ -60,24 +60,24 @@ const CourseManager = ({ setView, setSelectedCourse, token }) => {
         >
           <ArrowLeftIcon className="h-6 w-6" />
         </button>
-        <h2 className="text-2xl font-bold text-gray-800">Manage Courses</h2>
+        <h2 className="text-xl sm:text-2xl font-bold text-gray-800">Manage Courses</h2>
       </div>
-      {error && <p className="text-red-500 mb-4">{error}</p>}
-      <form onSubmit={handleCreateCourse} className="space-y-6 mb-8">
+      {error && <p className="text-red-500 mb-4 text-sm sm:text-base">{error}</p>}
+      <form onSubmit={handleCreateCourse} className="space-y-4 mb-6">
         <div>
-          <label className="block text-sm font-medium text-gray-700">New Course Name</label>
+          <label className="block text-sm sm:text-base font-medium text-gray-700">New Course Name</label>
           <input
             type="text"
             value={courseName}
             onChange={(e) => setCourseName(e.target.value)}
-            className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            className="mt-1 w-full p-3 sm:p-4 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm sm:text-base"
             required
           />
         </div>
         <button
           type="submit"
           disabled={loading}
-          className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+          className="w-full bg-indigo-600 text-white p-3 sm:p-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 active:bg-indigo-800 disabled:bg-indigo-300 text-sm sm:text-base font-medium"
         >
           {loading ? (
             <svg className="animate-spin h-5 w-5 mr-2 text-white" viewBox="0 0 24 24">
@@ -89,17 +89,17 @@ const CourseManager = ({ setView, setSelectedCourse, token }) => {
         </button>
       </form>
       <div>
-        <h3 className="text-lg font-semibold text-gray-800 mb-4">Your Courses</h3>
+        <h3 className="text-lg sm:text-xl font-semibold text-gray-800 mb-4">Your Courses</h3>
         {loading ? (
-          <p className="text-gray-600">Loading courses...</p>
+          <p className="text-gray-600 text-sm sm:text-base">Loading courses...</p>
         ) : courses.length === 0 ? (
-          <p className="text-gray-600">No courses available. Add one above!</p>
+          <p className="text-gray-600 text-sm sm:text-base">No courses available. Add one above!</p>
         ) : (
           <ul className="space-y-2">
             {courses.map((course) => (
               <li
                 key={course}
-                className="bg-indigo-50 p-4 rounded-lg hover:bg-indigo-100 cursor-pointer transition"
+                className="bg-indigo-50 p-3 sm:p-4 rounded-lg hover:bg-indigo-100 cursor-pointer transition text-sm sm:text-base"
                 onClick={() => handleSelectCourse(course)}
               >
                 {course}
