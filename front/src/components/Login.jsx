@@ -14,7 +14,7 @@ const Login = ({ onLogin }) => {
     setLoading(true);
     try {
       const endpoint = isRegister ? '/register' : '/login';
-      const response = await axios.post(`${process.env.REACT_APP_API_BASE_URL}${endpoint}`, {
+      const response = await axios.post(`${process.env.REACT_APP_API_URL}${endpoint}`, {
         username,
         password
       });
@@ -31,39 +31,39 @@ const Login = ({ onLogin }) => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-indigo-100 to-blue-200 animate-fade-in">
-      <div className="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md transform transition-all hover:scale-105">
+    <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-100 to-blue-200 p-4 sm:p-6">
+      <div className="bg-white p-6 sm:p-8 rounded-xl shadow-lg w-full max-w-md">
         <div className="flex justify-center mb-6">
           <LockClosedIcon className="h-12 w-12 text-indigo-600" />
         </div>
-        <h2 className="text-2xl font-bold text-center text-gray-800 mb-6">
+        <h2 className="text-2xl sm:text-3xl font-bold text-center text-gray-800 mb-6">
           {isRegister ? 'Create Account' : 'Welcome Back'}
         </h2>
-        <form onSubmit={handleSubmit} className="space-y-6">
+        <form onSubmit={handleSubmit} className="space-y-4 sm:space-y-6">
           <div>
-            <label className="block text-sm font-medium text-gray-700">Username</label>
+            <label className="block text-sm sm:text-base font-medium text-gray-700">Username</label>
             <input
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+              className="mt-1 w-full p-3 sm:p-4 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm sm:text-base"
               required
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700">Password</label>
+            <label className="block text-sm sm:text-base font-medium text-gray-700">Password</label>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+              className="mt-1 w-full p-3 sm:p-4 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 text-sm sm:text-base"
               required
             />
           </div>
           <button
             type="submit"
             disabled={loading}
-            className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            className="w-full bg-indigo-600 text-white p-3 sm:p-4 rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 active:bg-indigo-800 disabled:bg-indigo-300 text-sm sm:text-base font-medium"
           >
             {loading ? (
               <svg className="animate-spin h-5 w-5 mr-2 text-white" viewBox="0 0 24 24">
@@ -74,11 +74,11 @@ const Login = ({ onLogin }) => {
             {isRegister ? 'Register' : 'Login'}
           </button>
         </form>
-        <p className="mt-4 text-center text-sm text-gray-600">
+        <p className="mt-4 text-center text-sm sm:text-base">
           {isRegister ? 'Already have an account?' : "Don't have an account?"}
           <button
             onClick={() => setIsRegister(!isRegister)}
-            className="ml-1 text-indigo-600 hover:text-indigo-800 font-medium"
+            className="ml-1 text-indigo-600 hover:text-indigo-800 focus:outline-none"
           >
             {isRegister ? 'Login' : 'Register'}
           </button>
