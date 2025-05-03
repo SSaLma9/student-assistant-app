@@ -1,8 +1,7 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { BookOpenIcon, AcademicCapIcon, DocumentTextIcon, ClipboardDocumentCheckIcon } from '@heroicons/react/24/solid';
 
 const Dashboard = ({ onLogout, setView }) => {
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const buttons = [
     { label: 'Manage Courses', view: 'courses', icon: BookOpenIcon },
     { label: 'Manage Lectures', view: 'lectures', icon: DocumentTextIcon },
@@ -10,57 +9,20 @@ const Dashboard = ({ onLogout, setView }) => {
     { label: 'Exam Mode', view: 'exam', icon: ClipboardDocumentCheckIcon },
   ];
 
-  const toggleSidebar = () => {
-    setIsSidebarOpen(!isSidebarOpen);
-  };
-
   return (
-    <div className="dashboard-container">
-      <button
-        className="hamburger-menu"
-        onClick={toggleSidebar}
-      >
-        <svg className="menu-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16m-7 6h7"></path>
-        </svg>
-      </button>
-
-      <div className={`dashboard-sidebar ${isSidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
-        <h2 className="header-title">Dashboard</h2>
-        {buttons.map(({ label, view }) => (
+    <div className="bg-white p-6 sm:p-8 rounded-xl shadow-lg animate-fade-in">
+      <h2 className="text-3xl font-bold text-gray-800 mb-6 sm:mb-8 text-center">Dashboard</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        {buttons.map(({ label, view, icon: Icon }) => (
           <button
             key={label}
-            onClick={() => { setView(view); setIsSidebarOpen(false); }}
-            className="nav-button"
+            onClick={() => setView(view)}
+            className="bg-indigo-600 text-white p-4 sm:p-6 rounded-lg hover:bg-indigo-700 transition duration-300 flex flex-col items-center justify-center transform hover:scale-105"
           >
-            {label}
+            <Icon className="h-6 sm:h-8 w-6 sm:w-8 mb-2" />
+            <span className="text-base sm:text-lg font-semibold">{label}</span>
           </button>
         ))}
-        <button
-          onClick={() => { onLogout(); setIsSidebarOpen(false); }}
-          className="nav-button logout-button"
-        >
-          Logout
-        </button>
-      </div>
-
-      {isSidebarOpen && (
-        <div className="nav-overlay" onClick={toggleSidebar}></div>
-      )}
-
-      <div className="dashboard-content">
-        <div className="grid">
-          {buttons.map(({ label, view, icon: Icon }) => (
-            <div
-              key={label}
-              onClick={() => setView(view)}
-              className="grid-item"
-            >
-              <Icon className="grid-item-icon" />
-              <span className="grid-item-text">{label}</span>
-            </div>
-          ))}
-        </div>
       </div>
     </div>
   );
