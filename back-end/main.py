@@ -44,13 +44,11 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://student-assistant-frontend-production.up.railway.app"],
+    allow_origins=["*"],  # For testing, or use your frontend URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
 # Configuration
 USER_DATA_DIR = "user_data"
 USERS_FILE = "users.json"
