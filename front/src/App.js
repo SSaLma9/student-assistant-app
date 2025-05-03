@@ -13,6 +13,7 @@ const App = () => {
   const [token, setToken] = useState('');
   const [selectedCourse, setSelectedCourse] = useState('');
   const [selectedLecture, setSelectedLecture] = useState('');
+  const [isNavOpen, setIsNavOpen] = useState(false);
 
   const handleLogin = (username, token) => {
     setUsername(username);
@@ -52,36 +53,61 @@ const App = () => {
   };
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen flex flex-col bg-gradient-to-br from-blue-50 to-indigo-100 p-2 sm:p-4">
       {view !== 'login' && (
-        <nav className="bg-indigo-600 text-white p-4 shadow-lg">
-          <div className="max-w-7xl mx-auto flex justify-between items-center">
-            <h1 className="text-xl font-bold">Student Assistant</h1>
-            <div className="flex items-center space-x-4">
-              <span className="text-sm">Welcome, {username}</span>
-              <button onClick={() => setView('dashboard')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
-                Dashboard
-              </button>
-              <button onClick={() => setView('courses')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
-                Courses
-              </button>
-              <button onClick={() => setView('lectures')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
-                Lectures
-              </button>
-              <button onClick={() => setView('study')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
-                Study
-              </button>
-              <button onClick={() => setView('exam')} className="hover:bg-indigo-700 px-3 py-2 rounded transition">
-                Exam
-              </button>
-              <button onClick={handleLogout} className="hover:bg-red-600 px-3 py-2 rounded transition">
-                Logout
-              </button>
+        <>
+          {/* Hamburger Menu for Mobile */}
+          <button
+            className="md:hidden p-2 text-white focus:outline-none z-50"
+            onClick={() => setIsNavOpen(!isNavOpen)}
+          >
+            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16m-7 6h7"></path>
+            </svg>
+          </button>
+
+          {/* Navigation Bar */}
+          <nav
+            className={`bg-indigo-600 text-white shadow-lg transition-all duration-300 ${
+              isNavOpen ? 'max-h-screen' : 'max-h-0 md:max-h-screen'
+            } md:max-h-screen overflow-hidden`}
+          >
+            <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center p-2 sm:p-4">
+              <h1 className="text-lg sm:text-xl font-bold">Student Assistant</h1>
+              <div className="flex flex-col md:flex-row items-center space-y-2 md:space-y-0 md:space-x-4 mt-2 md:mt-0">
+                <span className="text-sm sm:text-base">Welcome, {username}</span>
+                <button onClick={() => { setView('dashboard'); setIsNavOpen(false); }} className="hover:bg-indigo-700 px-2 sm:px-3 py-1 sm:py-2 rounded transition text-sm sm:text-base">
+                  Dashboard
+                </button>
+                <button onClick={() => { setView('courses'); setIsNavOpen(false); }} className="hover:bg-indigo-700 px-2 sm:px-3 py-1 sm:py-2 rounded transition text-sm sm:text-base">
+                  Courses
+                </button>
+                <button onClick={() => { setView('lectures'); setIsNavOpen(false); }} className="hover:bg-indigo-700 px-2 sm:px-3 py-1 sm:py-2 rounded transition text-sm sm:text-base">
+                  Lectures
+                </button>
+                <button onClick={() => { setView('study'); setIsNavOpen(false); }} className="hover:bg-indigo-700 px-2 sm:px-3 py-1 sm:py-2 rounded transition text-sm sm:text-base">
+                  Study
+                </button>
+                <button onClick={() => { setView('exam'); setIsNavOpen(false); }} className="hover:bg-indigo-700 px-2 sm:px-3 py-1 sm:py-2 rounded transition text-sm sm:text-base">
+                  Exam
+                </button>
+                <button onClick={() => { handleLogout(); setIsNavOpen(false); }} className="hover:bg-red-600 px-2 sm:px-3 py-1 sm:py-2 rounded transition text-sm sm:text-base">
+                  Logout
+                </button>
+              </div>
             </div>
-          </div>
-        </nav>
+          </nav>
+
+          {/* Overlay for Mobile Nav */}
+          {isNavOpen && (
+            <div
+              className="fixed inset-0 bg-black opacity-50 md:hidden"
+              onClick={() => setIsNavOpen(false)}
+            ></div>
+          )}
+        </>
       )}
-      <main className="max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+      <main className="max-w-7xl mx-auto p-2 sm:p-4 lg:p-6 flex-1">
         {renderView()}
       </main>
       <ToastContainer position="top-right" autoClose={3000} hideProgressBar={false} />
