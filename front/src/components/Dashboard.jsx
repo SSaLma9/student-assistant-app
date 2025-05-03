@@ -15,66 +15,50 @@ const Dashboard = ({ onLogout, setView }) => {
   };
 
   return (
-    <div className="min-h-screen bg-gray-100 flex">
-      {/* Hamburger Menu for Mobile */}
+    <div className="dashboard-container">
       <button
-        className="md:hidden p-4 text-gray-700 focus:outline-none z-50"
+        className="hamburger-menu"
         onClick={toggleSidebar}
       >
-        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <svg className="menu-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16m-7 6h7"></path>
         </svg>
       </button>
 
-      {/* Sidebar */}
-      <div
-        className={`fixed inset-y-0 left-0 w-64 bg-white shadow-lg transform ${
-          isSidebarOpen ? 'translate-x-0' : '-translate-x-full'
-        } md:relative md:translate-x-0 transition-transform duration-300 ease-in-out z-40`}
-      >
-        <div className="p-6">
-          <h2 className="text-xl sm:text-2xl font-bold mb-6 text-gray-800">Dashboard</h2>
-          <nav className="space-y-2">
-            {buttons.map(({ label, view, icon: Icon }) => (
-              <button
-                key={label}
-                onClick={() => { setView(view); setIsSidebarOpen(false); }}
-                className="w-full text-left px-4 py-2 text-gray-700 hover:bg-indigo-100 rounded-md text-sm sm:text-base flex items-center"
-              >
-                <Icon className="h-5 w-5 mr-2" />
-                {label}
-              </button>
-            ))}
-            <button
-              onClick={onLogout}
-              className="w-full text-left px-4 py-2 text-gray-700 hover:bg-red-100 rounded-md text-sm sm:text-base mt-4"
-            >
-              Logout
-            </button>
-          </nav>
-        </div>
+      <div className={`dashboard-sidebar ${isSidebarOpen ? 'sidebar-open' : 'sidebar-closed'}`}>
+        <h2 className="header-title">Dashboard</h2>
+        {buttons.map(({ label, view }) => (
+          <button
+            key={label}
+            onClick={() => { setView(view); setIsSidebarOpen(false); }}
+            className="nav-button"
+          >
+            {label}
+          </button>
+        ))}
+        <button
+          onClick={() => { onLogout(); setIsSidebarOpen(false); }}
+          className="nav-button logout-button"
+        >
+          Logout
+        </button>
       </div>
 
-      {/* Overlay for Mobile Sidebar */}
       {isSidebarOpen && (
-        <div
-          className="fixed inset-0 bg-black opacity-50 md:hidden"
-          onClick={toggleSidebar}
-        ></div>
+        <div className="nav-overlay" onClick={toggleSidebar}></div>
       )}
 
-      {/* Main Content */}
-      <div className="flex-1 p-4 sm:p-6">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+      <div className="dashboard-content">
+        <div className="grid">
           {buttons.map(({ label, view, icon: Icon }) => (
-            <button
+            <div
               key={label}
               onClick={() => setView(view)}
-              className="bg-indigo-600 text-white p-4 sm:p-6 rounded-lg hover:bg-indigo-700 transition duration-300 flex flex-col items-center justify-center transform hover:scale-105 text-sm sm:text-base"
+              className="grid-item"
             >
-              <Icon className="h-6 w-6 sm:h-8 sm:w-8 mb-2" />
-              <span className="font-semibold">{label}</span>
-            </button>
+              <Icon className="grid-item-icon" />
+              <span className="grid-item-text">{label}</span>
+            </div>
           ))}
         </div>
       </div>
