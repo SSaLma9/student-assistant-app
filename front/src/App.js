@@ -13,7 +13,6 @@ const App = () => {
   const [token, setToken] = useState('');
   const [selectedCourse, setSelectedCourse] = useState('');
   const [selectedLecture, setSelectedLecture] = useState('');
-  const [isNavOpen, setIsNavOpen] = useState(false);
 
   const handleLogin = (username, token) => {
     setUsername(username);
@@ -55,50 +54,32 @@ const App = () => {
   return (
     <div className="app-container">
       {view !== 'login' && (
-        <>
-          {/* Hamburger Menu for Mobile */}
-          <button
-            className="hamburger-menu"
-            onClick={() => setIsNavOpen(!isNavOpen)}
-          >
-            <svg className="menu-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16m-7 6h7"></path>
-            </svg>
-          </button>
-
-          {/* Navigation Bar */}
-          <nav className={`nav-bar ${isNavOpen ? 'nav-open' : 'nav-closed'}`}>
-            <div className="nav-content">
-              <h1 className="nav-title">Student Assistant</h1>
-              <div className="nav-items">
-                <span className="nav-username">Welcome, {username}</span>
-                <button onClick={() => { setView('dashboard'); setIsNavOpen(false); }} className="nav-button">
-                  Dashboard
-                </button>
-                <button onClick={() => { setView('courses'); setIsNavOpen(false); }} className="nav-button">
-                  Courses
-                </button>
-                <button onClick={() => { setView('lectures'); setIsNavOpen(false); }} className="nav-button">
-                  Lectures
-                </button>
-                <button onClick={() => { setView('study'); setIsNavOpen(false); }} className="nav-button">
-                  Study
-                </button>
-                <button onClick={() => { setView('exam'); setIsNavOpen(false); }} className="nav-button">
-                  Exam
-                </button>
-                <button onClick={() => { handleLogout(); setIsNavOpen(false); }} className="nav-button logout-button">
-                  Logout
-                </button>
-              </div>
+        <nav className="nav-bar">
+          <div className="nav-content">
+            <h1 className="nav-title">Student Assistant</h1>
+            <div className="nav-items">
+              <span className="nav-username">Welcome, {username}</span>
+              <button onClick={() => setView('dashboard')} className="nav-button">
+                Dashboard
+              </button>
+              <button onClick={() => setView('courses')} className="nav-button">
+                Courses
+              </button>
+              <button onClick={() => setView('lectures')} className="nav-button">
+                Lectures
+              </button>
+              <button onClick={() => setView('study')} className="nav-button">
+                Study
+              </button>
+              <button onClick={() => setView('exam')} className="nav-button">
+                Exam
+              </button>
+              <button onClick={handleLogout} className="nav-button logout-button">
+                Logout
+              </button>
             </div>
-          </nav>
-
-          {/* Overlay for Mobile Nav */}
-          {isNavOpen && (
-            <div className="nav-overlay" onClick={() => setIsNavOpen(false)}></div>
-          )}
-        </>
+          </div>
+        </nav>
       )}
       <main className="main-content">
         {renderView()}
