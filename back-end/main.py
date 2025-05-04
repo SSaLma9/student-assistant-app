@@ -6,12 +6,11 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from typing import Optional, List, Dict
-import sqlite3
+import motor.motor_asyncio
 import jwt
 import datetime
 import PyPDF2
 import os
-import json
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from langchain_groq import ChatGroq
@@ -23,6 +22,8 @@ from langchain.prompts import PromptTemplate
 from pathlib import Path
 import re
 import logging
+import json
+from pymongo.errors import ConnectionError, ServerSelectionTimeoutError
 
 # Load environment variables
 load_dotenv()
@@ -53,38 +54,56 @@ app.add_middleware(
 # Configuration
 USER_DATA_DIR = "/app/user_data"  # Railway volume mount path
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MONGODB_URI = os.getenv("MONGODB_URI")
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
-# Initialize embedding model globally
-embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+# Lazy initialize embedding model
+embeddings_model = None
+def get_embeddings_model():
+    global embeddings_model
+    if embeddings_model is None:
+        logger.info("Initializing HuggingFaceEmbeddings")
+        embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    return embeddings_model
 
-# Database setup
-def init_db():
-    db_path = os.path.join(USER_DATA_DIR, 'student_assistant.db')
-    logger.info(f"Initializing database at {db_path}")
-    conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    # Users table
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (username TEXT PRIMARY KEY, hashed_password TEXT)''')
-    # Courses table
-    c.execute('''CREATE TABLE IF NOT EXISTS courses
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, course_name TEXT,
-                  UNIQUE(username, course_name))''')
-    # Lectures table
-    c.execute('''CREATE TABLE IF NOT EXISTS lectures
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, course_name TEXT,
-                  lecture_name TEXT, file_path TEXT,
-                  UNIQUE(username, course_name, lecture_name))''')
-    # Questions table (existing)
-    c.execute('''CREATE TABLE IF NOT EXISTS questions
-                 (id TEXT PRIMARY KEY, lecture_name TEXT, question TEXT, type TEXT,
-                  options TEXT, correct_answer TEXT)''')
-    conn.commit()
-    conn.close()
+# MongoDB setup with connection timeout
+try:
+    client = motor.motor_asyncio.AsyncIOMotorClient(
+        MONGODB_URI,
+        serverSelectionTimeoutMS=5000  # 5-second timeout
+    )
+    db = client.student_assistant
+    users_collection = db.users
+    courses_collection = db.courses
+    lectures_collection = db.lectures
+    questions_collection = db.questions
+    logger.info("MongoDB client initialized successfully")
+    
+    # Create indexes for performance
+    async def create_indexes():
+        await users_collection.create_index("username", unique=True)
+        await courses_collection.create_index([("username", 1), ("course_name", 1)], unique=True)
+        await lectures_collection.create_index([("username", 1), ("course_name", 1), ("lecture_name", 1)], unique=True)
+        await questions_collection.create_index("id", unique=True)
+        logger.info("MongoDB indexes created successfully")
+    
+    # Run index creation
+    import asyncio
+    asyncio.create_task(create_indexes())
+except Exception as e:
+    logger.error(f"Failed to initialize MongoDB client: {str(e)}")
+    raise Exception(f"MongoDB connection failed: {str(e)}")
 
-init_db()
+# Input validation regex
+NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+def validate_name(name: str, field: str) -> None:
+    if not NAME_PATTERN.match(name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field} must contain only letters, numbers, underscores, or hyphens"
+        )
 
 # Custom exception handlers
 @app.exception_handler(RequestValidationError)
@@ -114,7 +133,7 @@ async def general_exception_handler(request: Request, exc: Exception):
         headers={"Access-Control-Allow-Origin": "*"}
     )
 
-# Pydantic models (unchanged)
+# Pydantic models
 class UserCredentials(BaseModel):
     username: str
     password: str
@@ -144,80 +163,121 @@ class ErrorResponse(BaseModel):
     error: str
     details: Optional[str] = None
 
-# Database functions
-def get_user(username: str) -> Optional[Dict]:
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
-    c.execute("SELECT username, hashed_password FROM users WHERE username = ?", (username,))
-    user = c.fetchone()
-    conn.close()
-    if user:
-        return {"username": user[0], "hashed_password": user[1]}
-    return None
-
-def create_user(username: str, hashed_password: str):
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
+# MongoDB functions
+async def get_user(username: str) -> Optional[Dict]:
+    logger.info(f"Fetching user: {username}")
     try:
-        c.execute("INSERT INTO users (username, hashed_password) VALUES (?, ?)",
-                  (username, hashed_password))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
+        user = await users_collection.find_one({"username": username})
+        return user
+    except Exception as e:
+        logger.error(f"Error fetching user {username}: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already exists"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not fetch user: {str(e)}"
         )
-    conn.close()
 
-def get_user_courses(username: str) -> List[str]:
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
-    c.execute("SELECT course_name FROM courses WHERE username = ?", (username,))
-    courses = [row[0] for row in c.fetchall()]
-    conn.close()
-    return courses
-
-def create_course_db(username: str, course_name: str):
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
+async def create_user(username: str, hashed_password: str):
+    logger.info(f"Creating user: {username}")
     try:
-        c.execute("INSERT INTO courses (username, course_name) VALUES (?, ?)",
-                  (username, course_name))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
+        validate_name(username, "Username")
+        existing_user = await get_user(username)
+        if existing_user:
+            logger.error("Username already exists")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already exists"
+            )
+        user = {"username": username, "hashed_password": hashed_password}
+        await users_collection.insert_one(user)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error creating user {username}: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Course already exists"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not create user: {str(e)}"
         )
-    conn.close()
 
-def get_user_lectures(username: str, course_name: str) -> List[Dict]:
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
-    c.execute("SELECT lecture_name, file_path FROM lectures WHERE username = ? AND course_name = ?",
-              (username, course_name))
-    lectures = [{"name": row[0], "path": row[1]} for row in c.fetchall()]
-    conn.close()
-    return lectures
-
-def create_lecture_db(username: str, course_name: str, lecture_name: str, file_path: str):
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
+async def get_user_courses(username: str) -> List[str]:
+    logger.info(f"Fetching courses for user: {username}")
     try:
-        c.execute("INSERT INTO lectures (username, course_name, lecture_name, file_path) VALUES (?, ?, ?, ?)",
-                  (username, course_name, lecture_name, file_path))
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.close()
+        courses = await courses_collection.find({"username": username}).to_list(None)
+        return [course["course_name"] for course in courses]
+    except Exception as e:
+        logger.error(f"Error fetching courses for {username}: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Lecture already exists"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not fetch courses: {str(e)}"
         )
-    conn.close()
 
-# Authentication functions (updated)
+async def create_course_db(username: str, course_name: str):
+    logger.info(f"Creating course '{course_name}' for user: {username}")
+    try:
+        validate_name(course_name, "Course name")
+        existing_course = await courses_collection.find_one({"username": username, "course_name": course_name})
+        if existing_course:
+            logger.error("Course already exists")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Course already exists"
+            )
+        course = {"username": username, "course_name": course_name}
+        await courses_collection.insert_one(course)
+        logger.info(f"Course '{course_name}' created successfully for user: {username}")
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error creating course {course_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not create course: {str(e)}"
+        )
+
+async def get_user_lectures(username: str, course_name: str) -> List[Dict]:
+    logger.info(f"Fetching lectures for user: {username}, course: {course_name}")
+    try:
+        lectures = await lectures_collection.find({"username": username, "course_name": course_name}).to_list(None)
+        return [{"name": lec["lecture_name"], "path": lec["file_path"]} for lec in lectures]
+    except Exception as e:
+        logger.error(f"Error fetching lectures for {username}/{course_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not fetch lectures: {str(e)}"
+        )
+
+async def create_lecture_db(username: str, course_name: str, lecture_name: str, file_path: str):
+    logger.info(f"Creating lecture '{lecture_name}' for user: {username}, course: {course_name}")
+    try:
+        validate_name(lecture_name, "Lecture name")
+        existing_lecture = await lectures_collection.find_one({
+            "username": username,
+            "course_name": course_name,
+            "lecture_name": lecture_name
+        })
+        if existing_lecture:
+            logger.error("Lecture already exists")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Lecture already exists"
+            )
+        lecture = {
+            "username": username,
+            "course_name": course_name,
+            "lecture_name": lecture_name,
+            "file_path": file_path
+        }
+        await lectures_collection.insert_one(lecture)
+        logger.info(f"Lecture '{lecture_name}' created successfully for user: {username}")
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error creating lecture {lecture_name}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not create lecture: {str(e)}"
+        )
+
+# Authentication functions
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -227,7 +287,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.datetime.utcnow() +expires_delta
+        expire = datetime.datetime.utcnow() + expires_delta
     else:
         expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
     to_encode.update({"exp": expire})
@@ -252,15 +312,16 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
         )
     return username
 
-# AI and file processing functions (mostly unchanged)
+# AI and file processing functions
 def create_faiss_index(text: str) -> FAISS:
     try:
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200
+            chunk_size=500,  # Reduced to lower memory usage
+            chunk_overlap=100
         )
         chunks = text_splitter.split_text(text)
-        return FAISS.from_texts(chunks, embeddings_model)
+        embeddings = get_embeddings_model()
+        return FAISS.from_texts(chunks, embeddings)
     except Exception as e:
         logger.error(f"Error creating FAISS index: {str(e)}")
         raise HTTPException(
@@ -271,9 +332,10 @@ def create_faiss_index(text: str) -> FAISS:
 def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
     try:
         faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
+        embeddings = get_embeddings_model()
         vector_store = FAISS.load_local(
             faiss_path,
-            embeddings_model,
+            embeddings,
             allow_dangerous_deserialization=True
         )
         llm = ChatGroq(
@@ -298,13 +360,15 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
 def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> str:
     try:
         reader = PdfReader(file_path)
-        text = "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
-        
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
         # Create and save FAISS index
         faiss_index = create_faiss_index(text)
         faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
         faiss_index.save_local(faiss_path)
-        
         return text
     except Exception as e:
         logger.error(f"Error processing PDF: {str(e)}")
@@ -313,7 +377,7 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
             detail="Could not process PDF file"
         )
 
-# Prompt templates (unchanged)
+# Prompt templates
 EXAM_PROMPT = PromptTemplate(
     input_variables=["text", "level", "exam_type"],
     template="""
@@ -390,7 +454,7 @@ STUDY_PROMPTS = {
     )
 }
 
-def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
+async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
     try:
         mcqs = []
         essays = []
@@ -415,9 +479,8 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
                 continue
                 
             if current_section == 'mcqs':
-                if re.match(r"^\d+\.\s_rs = re.compile(r"^\d+\.\s")
-                if current_question:
-                    if current_section == 'mcqs':
+                if re.match(r"^\d+\.\s", line):
+                    if current_question:
                         mcqs.append('\n'.join(current_question))
                         current_question = []
                     current_question.append(line)
@@ -437,8 +500,6 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
                 essays.append('\n'.join(current_question))
                 
         flattened = []
-        conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-        c = conn.cursor()
         if exam_type == "MCQs":
             for idx, q in enumerate(mcqs):
                 lines = q.split('\n')
@@ -447,35 +508,39 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
                 answer_line = next((line for line in lines if line.startswith("Answer:")), "")
                 answer = answer_line.replace("Answer:", "").strip() if answer_line else ""
                 question_id = f"mcq_{lecture_name}_{idx}"
-                flattened.append({
+                question = {
                     "id": question_id,
-                    "type": "mcq",
+                    "lecture_name": lecture_name,
                     "question": question_text,
+                    "type": "mcq",
                     "options": options,
                     "correct_answer": answer
-                })
+                }
+                flattened.append(question)
                 logger.info(f"Inserting MCQ {question_id} for lecture '{lecture_name}'")
-                c.execute(
-                    "INSERT OR REPLACE INTO questions (id, lecture_name, question, type, options, correct_answer) VALUES (?, ?, ?, ?, ?, ?)",
-                    (question_id, lecture_name, question_text, "mcq", json.dumps(options), answer)
+                await questions_collection.update_one(
+                    {"id": question_id},
+                    {"$set": question},
+                    upsert=True
                 )
         elif exam_type == "Essay Questions":
             for idx, q in enumerate(essays):
                 question_id = f"essay_{lecture_name}_{idx}"
-                flattened.append({
+                question = {
                     "id": question_id,
-                    "type": "essay",
+                    "lecture_name": lecture_name,
                     "question": q,
+                    "type": "essay",
+                    "options": [],
                     "correct_answer": ""
-                })
+                }
+                flattened.append(question)
                 logger.info(f"Inserting essay question {question_id} for lecture '{lecture_name}'")
-                c.execute(
-                    "INSERT OR REPLACE INTO questions (id, lecture_name, question, type, options, correct_answer) VALUES (?, ?, ?, ?, ?, ?)",
-                    (question_id, lecture_name, q, "essay", json.dumps([]), "")
+                await questions_collection.update_one(
+                    {"id": question_id},
+                    {"$set": question},
+                    upsert=True
                 )
-        conn.commit()
-        logger.info("Database commit successful")
-        conn.close()
         return flattened
     except Exception as e:
         logger.error(f"Error parsing exam: {str(e)}", exc_info=True)
@@ -487,56 +552,112 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
 # API Endpoints
 @app.post("/register", response_model=dict)
 async def register(credentials: UserCredentials):
+    logger.info(f"Register attempt for username: {credentials.username}")
     if not credentials.username or not credentials.password:
+        logger.error("Username or password missing")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username and password required"
         )
     
     hashed_password = hash_password(credentials.password)
-    create_user(credentials.username, hashed_password)
-    
     try:
-        # Generate token for immediate login
+        await create_user(credentials.username, hashed_password)
+        logger.info(f"User {credentials.username} registered successfully")
         access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
             data={"sub": credentials.username}, expires_delta=access_token_expires
         )
         return {"message": "Registered successfully", "token": access_token}
+    except HTTPException as he:
+        logger.error(f"Registration failed: {str(he)}")
+        raise he
     except Exception as e:
-        logger.error(f"Error during registration: {str(e)}")
+        logger.error(f"Unexpected error during registration: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not complete registration"
+            detail=f"Could not complete registration: {str(e)}"
         )
 
 @app.post("/login", response_model=dict)
 async def login(credentials: UserCredentials):
-    user = get_user(credentials.username)
+    logger.info(f"Login attempt for username: {credentials.username}")
+    user = await get_user(credentials.username)
     if not user or not verify_password(credentials.password, user["hashed_password"]):
+        logger.error("Invalid credentials provided")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": credentials.username}, expires_delta=access_token_expires
-    )
-    return {"token": access_token}
+    try:
+        access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": credentials.username}, expires_delta=access_token_expires
+        )
+        logger.info(f"User {credentials.username} logged in successfully")
+        return {"token": access_token}
+    except Exception as e:
+        logger.error(f"Unexpected error during login: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not complete login: {str(e)}"
+        )
+
+@app.get("/profile", response_model=dict)
+async def get_profile(username: str = Depends(get_current_user)):
+    try:
+        logger.info(f"Fetching profile for user: {username}")
+        courses = await get_user_courses(username)
+        profile = {"username": username, "courses": []}
+        
+        for course_name in courses:
+            lectures = await get_user_lectures(username, course_name)
+            lecture_names = [lec["name"] for lec in lectures]
+            profile["courses"].append({
+                "course_name": course_name,
+                "lectures": lecture_names
+            })
+        
+        logger.info(f"Profile retrieved for user: {username}")
+        return {"profile": profile}
+    except Exception as e:
+        logger.error(f"Error retrieving profile for {username}: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not retrieve profile: {str(e)}"
+        )
 
 @app.post("/courses", response_model=dict)
 async def create_course(
     course: CourseCreate,
     username: str = Depends(get_current_user)
 ):
-    create_course_db(username, course.course_name)
-    return {"message": f"Course '{course.course_name}' created"}
+    try:
+        await create_course_db(username, course.course_name)
+        return {"message": f"Course '{course.course_name}' created"}
+    except HTTPException as he:
+        logger.error(f"Course creation failed: {str(he)}")
+        raise he
+    except Exception as e:
+        logger.error(f"Unexpected error during course creation: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not create course: {str(e)}"
+        )
 
 @app.get("/courses", response_model=dict)
 async def list_courses(username: str = Depends(get_current_user)):
-    courses = get_user_courses(username)
-    return {"courses": courses}
+    try:
+        courses = await get_user_courses(username)
+        logger.info(f"Retrieved courses for user: {username}")
+        return {"courses": courses}
+    except Exception as e:
+        logger.error(f"Error retrieving courses: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not retrieve courses: {str(e)}"
+        )
 
 @app.post("/lectures", response_model=dict)
 async def upload_lecture(
@@ -568,7 +689,7 @@ async def upload_lecture(
     file.file.seek(0)
     
     # Check if course exists
-    courses = get_user_courses(username)
+    courses = await get_user_courses(username)
     if course_name not in courses:
         logger.error(f"Course '{course_name}' not found for user '{username}'")
         raise HTTPException(
@@ -592,9 +713,8 @@ async def upload_lecture(
         lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
         
         # Store lecture in database
-        create_lecture_db(username, course_name, lecture_name, lecture_path)
+        await create_lecture_db(username, course_name, lecture_name, lecture_path)
         
-        logger.info(f"Lecture '{lecture_name}' uploaded successfully")
         return {"message": f"Lecture '{lecture_name}' uploaded"}
     except Exception as e:
         logger.error(f"Error uploading lecture: {str(e)}", exc_info=True)
@@ -605,40 +725,48 @@ async def upload_lecture(
 
 @app.get("/lectures/{course_name}", response_model=dict)
 async def list_lectures(course_name: str, username: str = Depends(get_current_user)):
-    courses = get_user_courses(username)
-    if course_name not in courses:
+    try:
+        courses = await get_user_courses(username)
+        if course_name not in courses:
+            logger.error(f"Course '{course_name}' not found for user '{username}'")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found"
+            )
+        lectures = await get_user_lectures(username, course_name)
+        lecture_names = [lec["name"] for lec in lectures]
+        logger.info(f"Retrieved lectures for course '{course_name}' by user: {username}")
+        return {"lectures": lecture_names}
+    except Exception as e:
+        logger.error(f"Error retrieving lectures: {str(e)}", exc_info=True)
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Course not found"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not retrieve lectures: {str(e)}"
         )
-    lectures = get_user_lectures(username, course_name)
-    lecture_names = [lec["name"] for lec in lectures]
-    return {"lectures": lecture_names}
 
 @app.post("/study", response_model=dict)
 async def generate_study_content(
     request: StudyRequest,
     username: str = Depends(get_current_user)
 ):
-    # Check if lecture exists
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
-    c.execute("SELECT lecture_name FROM lectures WHERE username = ? AND lecture_name = ?",
-              (username, request.lecture_name))
-    lecture = c.fetchone()
-    conn.close()
-    
-    if not lecture:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Lecture not found"
-        )
-    
     try:
+        # Check if lecture exists
+        lecture = await lectures_collection.find_one({
+            "username": username,
+            "lecture_name": request.lecture_name
+        })
+        if not lecture:
+            logger.error(f"Lecture '{request.lecture_name}' not found for user '{username}'")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found"
+            )
+        
         rag_chain = initialize_rag_chain(username, request.lecture_name)
         
         if request.task == "Custom Question":
             if not request.question:
+                logger.error("Question required for Custom Question task")
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Question required for Custom Question task"
@@ -648,12 +776,13 @@ async def generate_study_content(
             query = STUDY_PROMPTS[request.task].format(text="")
             
         response = rag_chain.invoke({"query": query})
+        logger.info(f"Generated study content for task '{request.task}' by user: {username}")
         return {"content": response["result"]}
     except Exception as e:
-        logger.error(f"Error generating study content: {str(e)}")
+        logger.error(f"Error generating study content: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not generate study content"
+            detail=f"Could not generate study content: {str(e)}"
         )
 
 @app.post("/exam", response_model=dict)
@@ -661,21 +790,19 @@ async def generate_exam(
     request: ExamRequest,
     username: str = Depends(get_current_user)
 ):
-    # Check if lecture exists
-    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-    c = conn.cursor()
-    c.execute("SELECT lecture_name FROM lectures WHERE username = ? AND lecture_name = ?",
-              (username, request.lecture_name))
-    lecture = c.fetchone()
-    conn.close()
-    
-    if not lecture:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Lecture not found"
-        )
-    
     try:
+        # Check if lecture exists
+        lecture = await lectures_collection.find_one({
+            "username": username,
+            "lecture_name": request.lecture_name
+        })
+        if not lecture:
+            logger.error(f"Lecture '{request.lecture_name}' not found for user '{username}'")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Lecture not found"
+            )
+        
         rag_chain = initialize_rag_chain(username, request.lecture_name)
         prompt = EXAM_PROMPT.format(
             text="",
@@ -683,13 +810,14 @@ async def generate_exam(
             exam_type=request.exam_type
         )
         response = rag_chain.invoke({"query": prompt})
-        questions = parse_exam(response["result"], request.exam_type, request.lecture_name)
+        questions = await parse_exam(response["result"], request.exam_type, request.lecture_name)
+        logger.info(f"Generated exam for lecture '{request.lecture_name}' by user: {username}")
         return {"questions": questions}
     except Exception as e:
-        logger.error(f"Error generating exam: {str(e)}")
+        logger.error(f"Error generating exam: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not generate exam"
+            detail=f"Could not generate exam: {str(e)}"
         )
 
 @app.post("/exam/grade", response_model=dict)
@@ -699,23 +827,19 @@ async def grade_answer_endpoint(
 ):
     try:
         # Retrieve question details from database
-        conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
-        c = conn.cursor()
-        c.execute(
-            "SELECT lecture_name, question, type, options, correct_answer FROM questions WHERE id = ?",
-            (answer.question_id,)
-        )
-        result = c.fetchone()
-        conn.close()
-        
-        if not result:
+        question = await questions_collection.find_one({"id": answer.question_id})
+        if not question:
+            logger.error(f"Question '{answer.question_id}' not found")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Question not found"
             )
         
-        lecture_name, question_text, q_type, options_json, correct_answer = result
-        options = json.loads(options_json) if options_json else []
+        lecture_name = question["lecture_name"]
+        question_text = question["question"]
+        q_type = question["type"]
+        options = question["options"]
+        correct_answer = question["correct_answer"]
         
         # Initialize RAG chain with the correct lecture
         rag_chain = initialize_rag_chain(username, lecture_name)
@@ -728,18 +852,36 @@ async def grade_answer_endpoint(
         )
         
         response = rag_chain.invoke({"query": prompt})
+        logger.info(f"Graded answer for question '{answer.question_id}' by user: {username}")
         return {"feedback": response["result"]}
     except Exception as e:
-        logger.error(f"Error grading answer: {str(e)}")
+        logger.error(f"Error grading answer: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not grade answer"
+            detail=f"Could not grade answer: {str(e)}"
         )
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    try:
+        # Check MongoDB connection
+        await client.admin.command('ping')
+        logger.info("Health check: MongoDB connection successful")
+        return {"status": "healthy", "mongodb": "connected"}
+    except (ConnectionError, ServerSelectionTimeoutError) as e:
+        logger.error(f"Health check failed: MongoDB connection error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Health check failed: MongoDB connection error: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Health check failed: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8080))  # Use Railway's PORT
+    uvicorn.run(app, host="0.0.0.0", port=port)
