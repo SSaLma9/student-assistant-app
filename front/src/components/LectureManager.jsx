@@ -40,16 +40,22 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     const formData = new FormData();
     formData.append('lecture_name', lectureName);
     formData.append('course_name', selectedCourse);
-    formData.append('file', file);
+    formData.append('pdf', file); // 
 
     try {
-        await axios.post(`${process.env.REACT_APP_API_BASE_URL}/lectures`, formData, {
+      await axios.post(`${process.env.REACT_APP_API_BASE_URL}/lectures`, formData, {
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'multipart/form-data'
         }
       });
-      setLectures([...lectures, lectureName]);
+
+      
+      const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setLectures(response.data.lectures || []);
+
       setLectureName('');
       setFile(null);
       toast.success('Lecture uploaded successfully!');
@@ -123,11 +129,11 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
           <ul className="space-y-2">
             {lectures.map((lecture) => (
               <li
-                key={lecture}
+                key={lecture.lecture_name || lecture}
                 className="bg-indigo-50 p-3 sm:p-4 rounded-lg hover:bg-indigo-100 cursor-pointer transition"
                 onClick={() => handleSelectLecture(lecture)}
               >
-                {lecture}
+                {lecture.lecture_name || lecture}
               </li>
             ))}
           </ul>
