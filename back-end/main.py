@@ -23,7 +23,7 @@ from pathlib import Path
 import re
 import logging
 import json
-from pymongo.errors import ConnectionError, ServerSelectionTimeoutError
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
 # Load environment variables
 load_dotenv()
@@ -868,7 +868,7 @@ async def health_check():
         await client.admin.command('ping')
         logger.info("Health check: MongoDB connection successful")
         return {"status": "healthy", "mongodb": "connected"}
-    except (ConnectionError, ServerSelectionTimeoutError) as e:
+    except (ConnectionFailure, ServerSelectionTimeoutError) as e:
         logger.error(f"Health check failed: MongoDB connection error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
