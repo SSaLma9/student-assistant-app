@@ -13,6 +13,7 @@ import PyPDF2
 import os
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
+from PyPDF2.errors import PdfReadError
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -64,7 +65,14 @@ def get_embeddings_model():
     global embeddings_model
     if embeddings_model is None:
         logger.info("Initializing HuggingFaceEmbeddings")
-        embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        try:
+            embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        except Exception as e:
+            logger.error(f"Failed to initialize HuggingFaceEmbeddings: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not initialize embeddings model: {str(e)}"
+            )
     return embeddings_model
 
 # MongoDB setup with connection timeout
@@ -314,24 +322,38 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
 
 # AI and file processing functions
 def create_faiss_index(text: str) -> FAISS:
+    logger.info("Creating FAISS index")
     try:
+        if not text.strip():
+            logger.error("Empty text provided for FAISS index creation")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No text provided for indexing"
+            )
+        logger.debug(f"Text length: {len(text)} characters")
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,  # Reduced to lower memory usage
-            chunk_overlap=100
+            chunk_size=300,  # Reduced to lower memory usage
+            chunk_overlap=50
         )
+        logger.debug("Splitting text into chunks")
         chunks = text_splitter.split_text(text)
+        logger.debug(f"Created {len(chunks)} chunks")
         embeddings = get_embeddings_model()
-        return FAISS.from_texts(chunks, embeddings)
+        logger.debug("Generating FAISS index")
+        faiss_index = FAISS.from_texts(chunks, embeddings)
+        logger.info("FAISS index created successfully")
+        return faiss_index
     except Exception as e:
-        logger.error(f"Error creating FAISS index: {str(e)}")
+        logger.error(f"Error creating FAISS index: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not process document"
+            detail=f"Could not process document: {str(e)}"
         )
 
 def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
     try:
         faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
+        logger.info(f"Loading FAISS index from {faiss_path}")
         embeddings = get_embeddings_model()
         vector_store = FAISS.load_local(
             faiss_path,
@@ -358,31 +380,50 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
         )
 
 def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> str:
+    logger.info(f"Processing PDF: {file_path}")
     try:
-        logger.info(f"Opening PDF file: {file_path}")
+        logger.debug(f"Opening PDF file: {file_path}")
         reader = PdfReader(file_path)
         text = ""
         for page_num, page in enumerate(reader.pages, 1):
             logger.debug(f"Extracting text from page {page_num}")
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-            else:
-                logger.warning(f"No text extracted from page {page_num}")
+            try:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+                else:
+                    logger.warning(f"No text extracted from page {page_num}")
+            except Exception as e:
+                logger.warning(f"Failed to extract text from page {page_num}: {str(e)}")
         if not text.strip():
             logger.error("No text could be extracted from PDF")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="PDF contains no extractable text"
+                detail="PDF contains no extractable text (e.g., image-based or encrypted)"
             )
+        logger.debug(f"Extracted text length: {len(text)} characters")
         # Create and save FAISS index
         logger.info(f"Creating FAISS index for lecture: {lecture_name}")
         faiss_index = create_faiss_index(text)
         faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
         logger.info(f"Saving FAISS index to: {faiss_path}")
         os.makedirs(os.path.dirname(faiss_path), exist_ok=True)
-        faiss_index.save_local(faiss_path)
+        try:
+            faiss_index.save_local(faiss_path)
+            logger.debug(f"FAISS index saved to {faiss_path}")
+        except OSError as e:
+            logger.error(f"Failed to save FAISS index to {faiss_path}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not save FAISS index: {str(e)}"
+            )
         return text
+    except PdfReadError as e:
+        logger.error(f"PDF read error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid or corrupted PDF file: {str(e)}"
+        )
     except Exception as e:
         logger.error(f"Error processing PDF {file_path}: {str(e)}", exc_info=True)
         raise HTTPException(
