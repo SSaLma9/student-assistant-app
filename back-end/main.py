@@ -67,24 +67,32 @@ def get_embeddings_model():
     if embeddings_model is None:
         logger.info("Initializing HuggingFaceEmbeddings")
         try:
-            # Use smaller model with optimized settings
-            embeddings_model = HuggingFaceEmbeddings(
-                model_name="sentence-transformers/all-MiniLM-L6-v2",
-                model_kwargs={'device': 'cpu'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
-            # Clear cache if using GPU
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            except ImportError:
-                pass
+            # Add retry logic and timeout settings
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    embeddings_model = HuggingFaceEmbeddings(
+                        model_name="sentence-transformers/all-MiniLM-L6-v2",
+                        model_kwargs={'device': 'cpu'},  # Force CPU usage
+                        encode_kwargs={'normalize_embeddings': True}
+                    )
+                    break
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    wait_time = (attempt + 1) * 5  # Exponential backoff
+                    logger.warning(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+            
+            # Verify the model loaded properly
+            if embeddings_model is None:
+                raise RuntimeError("Embeddings model failed to initialize after retries")
+                
         except Exception as e:
             logger.error(f"Failed to initialize HuggingFaceEmbeddings: {str(e)}")
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Could not initialize embeddings model: {str(e)}"
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,  # Changed to 503
+                detail="AI service temporarily unavailable. Please try again later."
             )
     return embeddings_model
 
