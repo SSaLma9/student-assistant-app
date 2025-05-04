@@ -15,7 +15,7 @@ import json
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings  # Updated import
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
@@ -28,13 +28,13 @@ import logging
 load_dotenv()
 
 # Initialize logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
 # Security configurations
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")  # Ensure this is set in .env
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -44,27 +44,43 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For testing, or use your frontend URL
+    allow_origins=["*"],  # Update to frontend URL in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 # Configuration
-USER_DATA_DIR = "user_data"
-USERS_FILE = "users.json"
+USER_DATA_DIR = "/app/user_data"  # Railway volume mount path
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 # Initialize embedding model globally
-embeddings_model = HuggingFaceEmbeddings( model_name="sentence-transformers/all-MiniLM-L6-v2")
+embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 # Database setup
 def init_db():
-    conn = sqlite3.connect('student_assistant.db')
+    db_path = os.path.join(USER_DATA_DIR, 'student_assistant.db')
+    logger.info(f"Initializing database at {db_path}")
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
+    # Users table
+    c.execute('''CREATE TABLE IF NOT EXISTS users
+                 (username TEXT PRIMARY KEY, hashed_password TEXT)''')
+    # Courses table
+    c.execute('''CREATE TABLE IF NOT EXISTS courses
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, course_name TEXT,
+                  UNIQUE(username, course_name))''')
+    # Lectures table
+    c.execute('''CREATE TABLE IF NOT EXISTS lectures
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, course_name TEXT,
+                  lecture_name TEXT, file_path TEXT,
+                  UNIQUE(username, course_name, lecture_name))''')
+    # Questions table (existing)
     c.execute('''CREATE TABLE IF NOT EXISTS questions
-                 (id TEXT PRIMARY KEY, lecture_name TEXT, question TEXT, type TEXT, options TEXT, correct_answer TEXT)''')
+                 (id TEXT PRIMARY KEY, lecture_name TEXT, question TEXT, type TEXT,
+                  options TEXT, correct_answer TEXT)''')
     conn.commit()
     conn.close()
 
@@ -78,6 +94,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"error": "Validation error", "details": details},
+        headers={"Access-Control-Allow-Origin": "*"}
     )
 
 @app.exception_handler(HTTPException)
@@ -85,6 +102,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": exc.detail},
+        headers={"Access-Control-Allow-Origin": "*"}
     )
 
 @app.exception_handler(Exception)
@@ -93,9 +111,10 @@ async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"error": "Internal server error"},
+        headers={"Access-Control-Allow-Origin": "*"}
     )
 
-# Pydantic models
+# Pydantic models (unchanged)
 class UserCredentials(BaseModel):
     username: str
     password: str
@@ -125,33 +144,80 @@ class ErrorResponse(BaseModel):
     error: str
     details: Optional[str] = None
 
-# Database and user management functions
-def load_users():
-    try:
-        if not os.path.exists(USERS_FILE):
-            with open(USERS_FILE, 'w') as f:
-                json.dump({}, f)
-            return {}
-        with open(USERS_FILE, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading users: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not load user data"
-        )
+# Database functions
+def get_user(username: str) -> Optional[Dict]:
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
+    c.execute("SELECT username, hashed_password FROM users WHERE username = ?", (username,))
+    user = c.fetchone()
+    conn.close()
+    if user:
+        return {"username": user[0], "hashed_password": user[1]}
+    return None
 
-def save_users(users: dict):
+def create_user(username: str, hashed_password: str):
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
     try:
-        with open(USERS_FILE, 'w') as f:
-            json.dump(users, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving users: {str(e)}")
+        c.execute("INSERT INTO users (username, hashed_password) VALUES (?, ?)",
+                  (username, hashed_password))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not save user data"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already exists"
         )
+    conn.close()
 
+def get_user_courses(username: str) -> List[str]:
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
+    c.execute("SELECT course_name FROM courses WHERE username = ?", (username,))
+    courses = [row[0] for row in c.fetchall()]
+    conn.close()
+    return courses
+
+def create_course_db(username: str, course_name: str):
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO courses (username, course_name) VALUES (?, ?)",
+                  (username, course_name))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Course already exists"
+        )
+    conn.close()
+
+def get_user_lectures(username: str, course_name: str) -> List[Dict]:
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
+    c.execute("SELECT lecture_name, file_path FROM lectures WHERE username = ? AND course_name = ?",
+              (username, course_name))
+    lectures = [{"name": row[0], "path": row[1]} for row in c.fetchall()]
+    conn.close()
+    return lectures
+
+def create_lecture_db(username: str, course_name: str, lecture_name: str, file_path: str):
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO lectures (username, course_name, lecture_name, file_path) VALUES (?, ?, ?, ?)",
+                  (username, course_name, lecture_name, file_path))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lecture already exists"
+        )
+    conn.close()
+
+# Authentication functions (updated)
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
@@ -161,47 +227,12 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.datetime.utcnow() + expires_delta
+        expire = datetime.datetime.utcnow() +expires_delta
     else:
         expire = datetime.datetime.utcnow() + datetime.timedelta(minutes=15)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
-
-def load_user_profile(username: str) -> dict:
-    try:
-        user_file = os.path.join(USER_DATA_DIR, f"{username}.json")
-        user_dir = os.path.join(USER_DATA_DIR, username)
-        lectures_dir = os.path.join(user_dir, "lectures")
-        
-        os.makedirs(lectures_dir, exist_ok=True)
-        
-        if not os.path.exists(user_file):
-            profile = {"courses": {}}
-            with open(user_file, 'w') as f:
-                json.dump(profile, f, indent=4)
-            return profile
-            
-        with open(user_file, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading user profile: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not load user profile"
-        )
-
-def save_user_profile(username: str, profile: dict):
-    try:
-        user_file = os.path.join(USER_DATA_DIR, f"{username}.json")
-        with open(user_file, 'w') as f:
-            json.dump(profile, f, indent=4)
-    except Exception as e:
-        logger.error(f"Error saving user profile: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not save user profile"
-        )
 
 def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     try:
@@ -221,7 +252,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
         )
     return username
 
-# AI and file processing functions
+# AI and file processing functions (mostly unchanged)
 def create_faiss_index(text: str) -> FAISS:
     try:
         text_splitter = RecursiveCharacterTextSplitter(
@@ -282,7 +313,7 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
             detail="Could not process PDF file"
         )
 
-# Prompt templates
+# Prompt templates (unchanged)
 EXAM_PROMPT = PromptTemplate(
     input_variables=["text", "level", "exam_type"],
     template="""
@@ -384,8 +415,9 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
                 continue
                 
             if current_section == 'mcqs':
-                if re.match(r"^\d+\.\s", line):
-                    if current_question:
+                if re.match(r"^\d+\.\s_rs = re.compile(r"^\d+\.\s")
+                if current_question:
+                    if current_section == 'mcqs':
                         mcqs.append('\n'.join(current_question))
                         current_question = []
                     current_question.append(line)
@@ -405,7 +437,7 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
                 essays.append('\n'.join(current_question))
                 
         flattened = []
-        conn = sqlite3.connect('student_assistant.db')
+        conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
         c = conn.cursor()
         if exam_type == "MCQs":
             for idx, q in enumerate(mcqs):
@@ -422,7 +454,7 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
                     "options": options,
                     "correct_answer": answer
                 })
-                # Store in database
+                logger.info(f"Inserting MCQ {question_id} for lecture '{lecture_name}'")
                 c.execute(
                     "INSERT OR REPLACE INTO questions (id, lecture_name, question, type, options, correct_answer) VALUES (?, ?, ?, ?, ?, ?)",
                     (question_id, lecture_name, question_text, "mcq", json.dumps(options), answer)
@@ -436,16 +468,17 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
                     "question": q,
                     "correct_answer": ""
                 })
-                # Store in database
+                logger.info(f"Inserting essay question {question_id} for lecture '{lecture_name}'")
                 c.execute(
                     "INSERT OR REPLACE INTO questions (id, lecture_name, question, type, options, correct_answer) VALUES (?, ?, ?, ?, ?, ?)",
                     (question_id, lecture_name, q, "essay", json.dumps([]), "")
                 )
         conn.commit()
+        logger.info("Database commit successful")
         conn.close()
         return flattened
     except Exception as e:
-        logger.error(f"Error parsing exam: {str(e)}")
+        logger.error(f"Error parsing exam: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not parse exam content"
@@ -454,31 +487,24 @@ def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
 # API Endpoints
 @app.post("/register", response_model=dict)
 async def register(credentials: UserCredentials):
-    users = load_users()
-    if credentials.username in users:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already exists"
-        )
     if not credentials.username or not credentials.password:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username and password required"
         )
     
-    users[credentials.username] = hash_password(credentials.password)
-    save_users(users)
+    hashed_password = hash_password(credentials.password)
+    create_user(credentials.username, hashed_password)
     
     try:
-        os.makedirs(os.path.join(USER_DATA_DIR, credentials.username, "lectures"), exist_ok=True)
-        # Generate token for immediate login after registration
+        # Generate token for immediate login
         access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
             data={"sub": credentials.username}, expires_delta=access_token_expires
         )
         return {"message": "Registered successfully", "token": access_token}
     except Exception as e:
-        logger.error(f"Error creating user directories: {str(e)}")
+        logger.error(f"Error during registration: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not complete registration"
@@ -486,9 +512,8 @@ async def register(credentials: UserCredentials):
 
 @app.post("/login", response_model=dict)
 async def login(credentials: UserCredentials):
-    users = load_users()
-    if (credentials.username not in users or 
-        not verify_password(credentials.password, users[credentials.username])):
+    user = get_user(credentials.username)
+    if not user or not verify_password(credentials.password, user["hashed_password"]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
@@ -505,21 +530,13 @@ async def create_course(
     course: CourseCreate,
     username: str = Depends(get_current_user)
 ):
-    profile = load_user_profile(username)
-    if course.course_name in profile["courses"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Course already exists"
-        )
-        
-    profile["courses"][course.course_name] = []
-    save_user_profile(username, profile)
+    create_course_db(username, course.course_name)
     return {"message": f"Course '{course.course_name}' created"}
 
 @app.get("/courses", response_model=dict)
 async def list_courses(username: str = Depends(get_current_user)):
-    profile = load_user_profile(username)
-    return {"courses": list(profile["courses"].keys())}
+    courses = get_user_courses(username)
+    return {"courses": courses}
 
 @app.post("/lectures", response_model=dict)
 async def upload_lecture(
@@ -528,8 +545,11 @@ async def upload_lecture(
     file: UploadFile = File(...),
     username: str = Depends(get_current_user)
 ):
+    logger.info(f"Uploading lecture '{lecture_name}' for course '{course_name}' by user '{username}'")
+    
     # Validate file type
     if file.content_type != "application/pdf":
+        logger.error("Invalid file type: not a PDF")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only PDF files are allowed"
@@ -538,15 +558,19 @@ async def upload_lecture(
     # Validate file size
     file.file.seek(0, 2)
     file_size = file.file.tell()
+    logger.info(f"File size: {file_size} bytes")
     if file_size > MAX_FILE_SIZE:
+        logger.error(f"File too large: {file_size} bytes, max is {MAX_FILE_SIZE} bytes")
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"File too large. Max size is {MAX_FILE_SIZE/1024/1024}MB"
         )
     file.file.seek(0)
     
-    profile = load_user_profile(username)
-    if course_name not in profile["courses"]:
+    # Check if course exists
+    courses = get_user_courses(username)
+    if course_name not in courses:
+        logger.error(f"Course '{course_name}' not found for user '{username}'")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Course not found"
@@ -554,50 +578,57 @@ async def upload_lecture(
     
     try:
         lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
+        logger.info(f"Saving lecture to {lecture_path}")
+        os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
         
         # Save the uploaded file
         with open(lecture_path, "wb") as f:
-            f.write(await file.read())
+            content = await file.read()
+            logger.info(f"Writing {len(content)} bytes to {lecture_path}")
+            f.write(content)
         
         # Process the PDF
+        logger.info(f"Extracting text from PDF at {lecture_path}")
         lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
         
-        # Update user profile
-        lecture_data = {"name": lecture_name, "path": lecture_path}
-        profile["courses"][course_name].append(lecture_data)
-        save_user_profile(username, profile)
+        # Store lecture in database
+        create_lecture_db(username, course_name, lecture_name, lecture_path)
         
+        logger.info(f"Lecture '{lecture_name}' uploaded successfully")
         return {"message": f"Lecture '{lecture_name}' uploaded"}
     except Exception as e:
-        logger.error(f"Error uploading lecture: {str(e)}")
+        logger.error(f"Error uploading lecture: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not upload lecture"
+            detail=f"Could not upload lecture: {str(e)}"
         )
 
 @app.get("/lectures/{course_name}", response_model=dict)
 async def list_lectures(course_name: str, username: str = Depends(get_current_user)):
-    profile = load_user_profile(username)
-    if course_name not in profile["courses"]:
+    courses = get_user_courses(username)
+    if course_name not in courses:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Course not found"
         )
-    lectures = [lec["name"] for lec in profile["courses"][course_name]]
-    return {"lectures": lectures}
+    lectures = get_user_lectures(username, course_name)
+    lecture_names = [lec["name"] for lec in lectures]
+    return {"lectures": lecture_names}
 
 @app.post("/study", response_model=dict)
 async def generate_study_content(
     request: StudyRequest,
     username: str = Depends(get_current_user)
 ):
-    profile = load_user_profile(username)
-    lecture_exists = any(
-        lec["name"] == request.lecture_name
-        for course in profile["courses"].values()
-        for lec in course
-    )
-    if not lecture_exists:
+    # Check if lecture exists
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
+    c.execute("SELECT lecture_name FROM lectures WHERE username = ? AND lecture_name = ?",
+              (username, request.lecture_name))
+    lecture = c.fetchone()
+    conn.close()
+    
+    if not lecture:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Lecture not found"
@@ -630,13 +661,15 @@ async def generate_exam(
     request: ExamRequest,
     username: str = Depends(get_current_user)
 ):
-    profile = load_user_profile(username)
-    lecture_exists = any(
-        lec["name"] == request.lecture_name
-        for course in profile["courses"].values()
-        for lec in course
-    )
-    if not lecture_exists:
+    # Check if lecture exists
+    conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
+    c = conn.cursor()
+    c.execute("SELECT lecture_name FROM lectures WHERE username = ? AND lecture_name = ?",
+              (username, request.lecture_name))
+    lecture = c.fetchone()
+    conn.close()
+    
+    if not lecture:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Lecture not found"
@@ -666,7 +699,7 @@ async def grade_answer_endpoint(
 ):
     try:
         # Retrieve question details from database
-        conn = sqlite3.connect('student_assistant.db')
+        conn = sqlite3.connect(os.path.join(USER_DATA_DIR, 'student_assistant.db'))
         c = conn.cursor()
         c.execute(
             "SELECT lecture_name, question, type, options, correct_answer FROM questions WHERE id = ?",
