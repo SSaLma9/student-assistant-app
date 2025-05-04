@@ -359,22 +359,35 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
 
 def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> str:
     try:
+        logger.info(f"Opening PDF file: {file_path}")
         reader = PdfReader(file_path)
         text = ""
-        for page in reader.pages:
+        for page_num, page in enumerate(reader.pages, 1):
+            logger.debug(f"Extracting text from page {page_num}")
             page_text = page.extract_text()
             if page_text:
                 text += page_text + "\n"
+            else:
+                logger.warning(f"No text extracted from page {page_num}")
+        if not text.strip():
+            logger.error("No text could be extracted from PDF")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PDF contains no extractable text"
+            )
         # Create and save FAISS index
+        logger.info(f"Creating FAISS index for lecture: {lecture_name}")
         faiss_index = create_faiss_index(text)
         faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
+        logger.info(f"Saving FAISS index to: {faiss_path}")
+        os.makedirs(os.path.dirname(faiss_path), exist_ok=True)
         faiss_index.save_local(faiss_path)
         return text
     except Exception as e:
-        logger.error(f"Error processing PDF: {str(e)}")
+        logger.error(f"Error processing PDF {file_path}: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not process PDF file"
+            detail=f"Could not process PDF file: {str(e)}"
         )
 
 # Prompt templates
@@ -668,56 +681,86 @@ async def upload_lecture(
 ):
     logger.info(f"Uploading lecture '{lecture_name}' for course '{course_name}' by user '{username}'")
     
-    # Validate file type
-    if file.content_type != "application/pdf":
-        logger.error("Invalid file type: not a PDF")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only PDF files are allowed"
-        )
-    
-    # Validate file size
-    file.file.seek(0, 2)
-    file_size = file.file.tell()
-    logger.info(f"File size: {file_size} bytes")
-    if file_size > MAX_FILE_SIZE:
-        logger.error(f"File too large: {file_size} bytes, max is {MAX_FILE_SIZE} bytes")
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File too large. Max size is {MAX_FILE_SIZE/1024/1024}MB"
-        )
-    file.file.seek(0)
-    
-    # Check if course exists
-    courses = await get_user_courses(username)
-    if course_name not in courses:
-        logger.error(f"Course '{course_name}' not found for user '{username}'")
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Course not found"
-        )
-    
     try:
+        # Validate inputs
+        validate_name(lecture_name, "Lecture name")
+        validate_name(course_name, "Course name")
+        logger.debug(f"Input validation passed: lecture_name={lecture_name}, course_name={course_name}")
+
+        # Validate file type
+        if file.content_type != "application/pdf":
+            logger.error(f"Invalid file type: {file.content_type}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are allowed"
+            )
+        logger.debug(f"File type validated: {file.content_type}")
+
+        # Validate file size
+        file.file.seek(0, 2)
+        file_size = file.file.tell()
+        logger.info(f"File size: {file_size} bytes")
+        if file_size > MAX_FILE_SIZE:
+            logger.error(f"File too large: {file_size} bytes, max is {MAX_FILE_SIZE} bytes")
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"File too large. Max size is {MAX_FILE_SIZE/1024/1024}MB"
+            )
+        if file_size == 0:
+            logger.error("Empty file uploaded")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded file is empty"
+            )
+        file.file.seek(0)
+        logger.debug("File size validated")
+
+        # Check if course exists
+        courses = await get_user_courses(username)
+        if course_name not in courses:
+            logger.error(f"Course '{course_name}' not found for user '{username}'")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Course not found"
+            )
+        logger.debug(f"Course '{course_name}' exists")
+
+        # Prepare file storage path
         lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
-        logger.info(f"Saving lecture to {lecture_path}")
+        logger.info(f"Preparing to save lecture to {lecture_path}")
         os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
         
         # Save the uploaded file
-        with open(lecture_path, "wb") as f:
-            content = await file.read()
-            logger.info(f"Writing {len(content)} bytes to {lecture_path}")
-            f.write(content)
-        
+        logger.debug(f"Writing file to {lecture_path}")
+        try:
+            with open(lecture_path, "wb") as f:
+                content = await file.read()
+                logger.info(f"Writing {len(content)} bytes to {lecture_path}")
+                f.write(content)
+            logger.debug(f"File successfully saved to {lecture_path}")
+        except OSError as e:
+            logger.error(f"Failed to write file to {lecture_path}: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to save file: {str(e)}"
+            )
+
         # Process the PDF
         logger.info(f"Extracting text from PDF at {lecture_path}")
         lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
-        
+        logger.debug(f"PDF text extraction completed, length: {len(lecture_text)} characters")
+
         # Store lecture in database
+        logger.info(f"Storing lecture metadata in MongoDB")
         await create_lecture_db(username, course_name, lecture_name, lecture_path)
-        
+        logger.info(f"Lecture '{lecture_name}' successfully uploaded and stored")
+
         return {"message": f"Lecture '{lecture_name}' uploaded"}
+    except HTTPException as he:
+        logger.error(f"Upload failed: {str(he)}")
+        raise he
     except Exception as e:
-        logger.error(f"Error uploading lecture: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error during lecture upload: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not upload lecture: {str(e)}"
