@@ -13,3 +13,4 @@ faiss-cpu
 sentence-transformers
 langchain-huggingface
 motor
+psutil
