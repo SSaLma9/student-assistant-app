@@ -124,6 +124,9 @@ def get_embeddings_model():
 
 # MongoDB setup with retries
 async def init_mongodb():
+    if not MONGODB_URI:
+        logger.error("MONGODB_URI environment variable not set")
+        raise Exception("MONGODB_URI not configured")
     max_retries = 5
     retry_delay = 5
     for attempt in range(max_retries):
@@ -165,6 +168,7 @@ async def startup_event():
             logger.info("MongoDB indexes created successfully")
         except Exception as e:
             logger.error(f"Failed to create MongoDB indexes: {str(e)}")
+            raise Exception(f"Failed to create MongoDB indexes: {str(e)}")
     except Exception as e:
         logger.error(f"Failed to initialize MongoDB client: {str(e)}")
         raise Exception(f"MongoDB connection failed: {str(e)}")
@@ -207,14 +211,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     details = "; ".join([f"{err['loc'][-1]}: {err['msg']}" for err in errors])
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"error": "Validation error", "details": details}
+        content={"error": "Validation error", "details": details},
+        headers={"Access-Control-Allow-Origin": "*"}
     )
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": exc.detail}
+        content={"error": exc.detail},
+        headers={"Access-Control-Allow-Origin": "*"}
     )
 
 @app.exception_handler(MemoryError)
@@ -222,7 +228,8 @@ async def memory_error_handler(request: Request, exc: MemoryError):
     logger.error(f"Memory error occurred: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-        content={"error": "Server ran out of memory. Try a smaller file or upgrade your plan."}
+        content={"error": "Server ran out of memory. Try a smaller file or upgrade your plan."},
+        headers={"Access-Control-Allow-Origin": "*"}
     )
 
 @app.exception_handler(Exception)
@@ -230,7 +237,8 @@ async def general_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unexpected error: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": f"Internal server error: {str(exc)}"}
+        content={"error": f"Internal server error: {str(exc)}"},
+        headers={"Access-Control-Allow-Origin": "*"}
     )
 
 # Pydantic models
@@ -262,6 +270,12 @@ class AnswerSubmit(BaseModel):
 # MongoDB functions
 async def get_user(username: str) -> Optional[Dict]:
     logger.info(f"Fetching user: {username}")
+    if not users_collection:
+        logger.error("Users collection not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized"
+        )
     try:
         user = await users_collection.find_one({"username": username})
         if user is None:
@@ -395,10 +409,24 @@ async def create_lecture_db(username: str, course_name: str, lecture_name: str, 
 
 # Authentication functions
 def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    try:
+        return pwd_context.hash(password)
+    except Exception as e:
+        logger.error(f"Error hashing password: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Password hashing failed"
+        )
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return pwd_context.verify(plain_password, hashed_password)
+    except Exception as e:
+        logger.error(f"Error verifying password: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Password verification failed"
+        )
 
 def create_access_token(data: dict, expires_delta: Optional[datetime.timedelta] = None):
     to_encode = data.copy()
@@ -420,7 +448,8 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
                 detail="Invalid authentication credentials",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-    except jwt.PyJWTError:
+    except jwt.PyJWTError as e:
+        logger.error(f"JWT decode error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication credentials",
@@ -864,23 +893,43 @@ async def register(credentials: UserCredentials):
 @app.post("/login", response_model=dict)
 async def login(credentials: UserCredentials):
     logger.info(f"Login attempt for username: {credentials.username}")
-    user = await get_user(credentials.username)
-    if not user or not verify_password(credentials.password, user["hashed_password"]):
-        logger.error("Invalid credentials provided")
+    if not credentials.username or not credentials.password:
+        logger.error("Username or password missing")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username and password required"
         )
+
     try:
+        user = await get_user(credentials.username)
+        logger.info(f"User fetch result for {credentials.username}: {user}")
+        if not user:
+            logger.warning(f"User {credentials.username} not found")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if not verify_password(credentials.password, user["hashed_password"]):
+            logger.warning(f"Password verification failed for user {credentials.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         access_token_expires = datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
             data={"sub": credentials.username}, expires_delta=access_token_expires
         )
         logger.info(f"User {credentials.username} logged in successfully")
         return {"token": access_token}
+
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        logger.error(f"Unexpected error during login: {str(e)}")
+        logger.error(f"Unexpected error during login for {credentials.username}: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not complete login: {str(e)}"
@@ -1193,14 +1242,18 @@ async def grade_answer_endpoint(
 @app.get("/health")
 async def health_check():
     try:
-        await client.admin.command('ping')
+        if client:
+            await client.admin.command('ping')
+        else:
+            logger.error("MongoDB client not initialized")
+            raise Exception("MongoDB client not initialized")
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
         volume_writable = check_volume_writable()
         logger.info(f"Health check: MongoDB connected, Memory: {mem.percent}%, Disk: {disk.percent}%, Volume writable: {volume_writable}")
         return {
             "status": "healthy" if volume_writable else "unhealthy",
-            "mongodb": "connected",
+            "mongodb": "connected" if client else "disconnected",
             "memory_percent": mem.percent,
             "disk_percent": disk.percent,
             "volume_writable": volume_writable
