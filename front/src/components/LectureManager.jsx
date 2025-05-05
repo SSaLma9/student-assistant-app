@@ -1,21 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import axiosRetry from 'axios-retry';
 import { toast } from 'react-toastify';
 import { ArrowLeftIcon, DocumentArrowUpIcon } from '@heroicons/react/24/solid';
-
-// Configure axios retry
-axiosRetry(axios, {
-  retries: 3,
-  retryDelay: (retryCount) => retryCount * 1000,
-  retryCondition: (error) => {
-    return (
-      axiosRetry.isNetworkOrIdempotentRequestError(error) ||
-      error.response?.status === 429 ||
-      error.response?.status === 503
-    );
-  }
-});
 
 const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) => {
   const [lectures, setLectures] = useState([]);
