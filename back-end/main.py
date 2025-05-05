@@ -29,6 +29,7 @@ import time
 import gc
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
 import psutil
+import asyncio
 
 # Load environment variables
 load_dotenv()
@@ -48,6 +49,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Add CORS middleware
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -60,8 +62,21 @@ app.add_middleware(
 USER_DATA_DIR = "/app/user_data"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
-MAX_FILE_SIZE = 2 * 1024 * 1024  # Reduced to 2MB
+MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB
 os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+# Check volume writability
+def check_volume_writable():
+    test_file = os.path.join(USER_DATA_DIR, ".write_test")
+    try:
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        logger.info(f"Volume {USER_DATA_DIR} is writable")
+        return True
+    except (OSError, PermissionError) as e:
+        logger.error(f"Volume {USER_DATA_DIR} is not writable: {str(e)}")
+        return False
 
 # Lazy initialize embedding model
 embeddings_model = None
@@ -78,7 +93,7 @@ def get_embeddings_model():
                         model_kwargs={'device': 'cpu'},
                         encode_kwargs={
                             'normalize_embeddings': True,
-                            'batch_size': 4  # Reduced
+                            'batch_size': 4
                         }
                     )
                     break
@@ -98,12 +113,29 @@ def get_embeddings_model():
             )
     return embeddings_model
 
-# MongoDB setup
+# MongoDB setup with retries
+async def init_mongodb():
+    max_retries = 5
+    retry_delay = 5
+    for attempt in range(max_retries):
+        try:
+            client = motor.motor_asyncio.AsyncIOMotorClient(
+                MONGODB_URI,
+                serverSelectionTimeoutMS=5000
+            )
+            await client.admin.command('ping')
+            logger.info("MongoDB connection established")
+            return client
+        except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+            if attempt == max_retries - 1:
+                logger.error(f"MongoDB connection failed after {max_retries} attempts: {str(e)}")
+                raise Exception(f"MongoDB connection failed: {str(e)}")
+            logger.warning(f"MongoDB connection attempt {attempt + 1} failed: {str(e)}. Retrying in {retry_delay} seconds...")
+            await asyncio.sleep(retry_delay)
+            retry_delay *= 2
+
 try:
-    client = motor.motor_asyncio.AsyncIOMotorClient(
-        MONGODB_URI,
-        serverSelectionTimeoutMS=5000
-    )
+    client = asyncio.get_event_loop().run_until_complete(init_mongodb())
     db = client.student_assistant
     users_collection = db.users
     courses_collection = db.courses
@@ -112,13 +144,15 @@ try:
     logger.info("MongoDB client initialized successfully")
     
     async def create_indexes():
-        await users_collection.create_index("username", unique=True)
-        await courses_collection.create_index([("username", 1), ("course_name", 1)], unique=True)
-        await lectures_collection.create_index([("username", 1), ("course_name", 1), ("lecture_name", 1)], unique=True)
-        await questions_collection.create_index("id", unique=True)
-        logger.info("MongoDB indexes created successfully")
+        try:
+            await users_collection.create_index("username", unique=True)
+            await courses_collection.create_index([("username", 1), ("course_name", 1)], unique=True)
+            await lectures_collection.create_index([("username", 1), ("course_name", 1), ("lecture_name", 1)], unique=True)
+            await questions_collection.create_index("id", unique=True)
+            logger.info("MongoDB indexes created successfully")
+        except Exception as e:
+            logger.error(f"Failed to create MongoDB indexes: {str(e)}")
     
-    import asyncio
     asyncio.create_task(create_indexes())
 except Exception as e:
     logger.error(f"Failed to initialize MongoDB client: {str(e)}")
@@ -163,7 +197,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"error": "Validation error", "details": details},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
     )
 
 @app.exception_handler(HTTPException)
@@ -171,7 +205,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": exc.detail},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
     )
 
 @app.exception_handler(MemoryError)
@@ -180,7 +214,7 @@ async def memory_error_handler(request: Request, exc: MemoryError):
     return JSONResponse(
         status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
         content={"error": "Server ran out of memory. Try a smaller file or upgrade your plan."},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
     )
 
 @app.exception_handler(Exception)
@@ -188,8 +222,8 @@ async def general_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unexpected error: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": "Internal server error"},
-        headers={"Access-Control-Allow-Origin": "*"}
+        content={"error": f"Internal server error: {str(exc)}"},
+        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
     )
 
 # Pydantic models
@@ -223,6 +257,8 @@ async def get_user(username: str) -> Optional[Dict]:
     logger.info(f"Fetching user: {username}")
     try:
         user = await users_collection.find_one({"username": username})
+        if user is None:
+            logger.warning(f"User {username} not found")
         return user
     except Exception as e:
         logger.error(f"Error fetching user {username}: {str(e)}")
@@ -244,8 +280,13 @@ async def create_user(username: str, hashed_password: str):
             )
         user = {"username": username, "hashed_password": hashed_password}
         await users_collection.insert_one(user)
-    except HTTPException as he:
-        raise he
+        logger.info(f"User {username} created successfully")
+    except DuplicateKeyError:
+        logger.error("Duplicate username")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already exists"
+        )
     except Exception as e:
         logger.error(f"Error creating user {username}: {str(e)}")
         raise HTTPException(
@@ -257,7 +298,9 @@ async def get_user_courses(username: str) -> List[str]:
     logger.info(f"Fetching courses for user: {username}")
     try:
         courses = await courses_collection.find({"username": username}).to_list(None)
-        return [course["course_name"] for course in courses]
+        course_names = [course["course_name"] for course in courses]
+        logger.info(f"Found {len(course_names)} courses for {username}")
+        return course_names
     except Exception as e:
         logger.error(f"Error fetching courses for {username}: {str(e)}")
         raise HTTPException(
@@ -279,8 +322,12 @@ async def create_course_db(username: str, course_name: str):
         course = {"username": username, "course_name": course_name}
         await courses_collection.insert_one(course)
         logger.info(f"Course '{course_name}' created successfully")
-    except HTTPException as he:
-        raise he
+    except DuplicateKeyError:
+        logger.error("Duplicate course name")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Course already exists"
+        )
     except Exception as e:
         logger.error(f"Error creating course {course_name}: {str(e)}")
         raise HTTPException(
@@ -292,7 +339,9 @@ async def get_user_lectures(username: str, course_name: str) -> List[Dict]:
     logger.info(f"Fetching lectures for user: {username}, course: {course_name}")
     try:
         lectures = await lectures_collection.find({"username": username, "course_name": course_name}).to_list(None)
-        return [{"name": lec["lecture_name"], "path": lec["file_path"]} for lec in lectures]
+        lecture_list = [{"name": lec["lecture_name"], "path": lec["file_path"]} for lec in lectures]
+        logger.info(f"Found {len(lecture_list)} lectures for {username}/{course_name}")
+        return lecture_list
     except Exception as e:
         logger.error(f"Error fetching lectures for {username}/{course_name}: {str(e)}")
         raise HTTPException(
@@ -323,14 +372,12 @@ async def create_lecture_db(username: str, course_name: str, lecture_name: str, 
         }
         await lectures_collection.insert_one(lecture)
         logger.info(f"Lecture '{lecture_name}' created successfully")
-    except DuplicateKeyError as e:
-        logger.error(f"Duplicate lecture name: {str(e)}")
+    except DuplicateKeyError:
+        logger.error(f"Duplicate lecture name: {lecture_name}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Lecture name already exists"
         )
-    except HTTPException as he:
-        raise he
     except Exception as e:
         logger.error(f"Error creating lecture {lecture_name}: {str(e)}")
         raise HTTPException(
@@ -386,7 +433,7 @@ def create_faiss_index(text: str) -> FAISS:
         check_memory_usage()
         
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=50,  # Reduced for memory
+            chunk_size=50,
             chunk_overlap=5
         )
         
@@ -409,7 +456,8 @@ def create_faiss_index(text: str) -> FAISS:
             del batch_chunks, batch_vectors
             gc.collect()
         
-        faiss_index = FAISS.from_embeddings(list(zip(chunks, vectors)))
+        text_embeddings = list(zip(chunks, vectors))
+        faiss_index = FAISS.from_embeddings(text_embeddings, embeddings)
         logger.info("FAISS index created successfully")
         return faiss_index
     except MemoryError as me:
@@ -422,7 +470,7 @@ def create_faiss_index(text: str) -> FAISS:
         logger.error(f"Error creating FAISS index: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Could not process document: {str(e)}"
+            detail=f"Failed to create FAISS index: {str(e)}"
         )
 
 def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
@@ -484,6 +532,7 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
         )
 
 def validate_pdf(file_path: str) -> None:
+    logger.info(f"Validating PDF: {file_path}")
     try:
         with open(file_path, 'rb') as f:
             reader = PdfReader(f)
@@ -528,6 +577,7 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
         with open(file_path, 'rb') as f:
             reader = PdfReader(f)
             total_pages = len(reader.pages)
+            logger.info(f"PDF has {total_pages} pages")
             
             for page_num in range(total_pages):
                 if page_num % 5 == 0:
@@ -882,6 +932,12 @@ async def upload_lecture(
     try:
         check_memory_usage()
         
+        if not check_volume_writable():
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Storage volume is not writable"
+            )
+        
         validate_name(lecture_name, "Lecture name")
         validate_name(course_name, "Course name")
 
@@ -927,10 +983,12 @@ async def upload_lecture(
             )
 
         os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
+        logger.info(f"Saving PDF to: {lecture_path}")
         try:
             with open(lecture_path, "wb") as f:
                 while chunk := await file.read(8192):
                     f.write(chunk)
+            logger.info(f"PDF saved successfully: {lecture_path}")
         except PermissionError as e:
             logger.error(f"Permission denied writing to {lecture_path}: {str(e)}")
             cleanup_lecture_files(lecture_path, faiss_path)
@@ -981,7 +1039,7 @@ async def list_lectures(course_name: str, username: str = Depends(get_current_us
             )
         lectures = await get_user_lectures(username, course_name)
         lecture_names = [lec["name"] for lec in lectures]
-        logger.info(f"Retrieved lectures for course '{course_name}' by user: {username}")
+        logger.info(f"Retrieved {len(lecture_names)} lectures for course '{course_name}' by user: {username}")
         return {"lectures": lecture_names}
     except Exception as e:
         logger.error(f"Error retrieving lectures: {str(e)}")
@@ -1106,8 +1164,17 @@ async def grade_answer_endpoint(
 async def health_check():
     try:
         await client.admin.command('ping')
-        logger.info("MongoDB connection successful")
-        return {"status": "healthy", "mongodb": "connected"}
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        volume_writable = check_volume_writable()
+        logger.info(f"Health check: MongoDB connected, Memory: {mem.percent}%, Disk: {disk.percent}%, Volume writable: {volume_writable}")
+        return {
+            "status": "healthy" if volume_writable else "unhealthy",
+            "mongodb": "connected",
+            "memory_percent": mem.percent,
+            "disk_percent": disk.percent,
+            "volume_writable": volume_writable
+        }
     except (ConnectionFailure, ServerSelectionTimeoutError) as e:
         logger.error(f"MongoDB connection error: {str(e)}")
         raise HTTPException(
@@ -1125,6 +1192,7 @@ async def health_check():
 async def resource_check():
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
+    volume_writable = check_volume_writable()
     return {
         "memory": {
             "total": f"{mem.total/1024/1024:.2f} MB",
@@ -1138,10 +1206,12 @@ async def resource_check():
             "used": f"{disk.used/1024/1024:.2f} MB",
             "percent": disk.percent
         },
-        "status": "ok" if mem.percent < 85 and disk.percent < 90 else "warning"
+        "volume_writable": volume_writable,
+        "status": "ok" if mem.percent < 85 and disk.percent < 90 and volume_writable else "warning"
     }
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8080))
+    logger.info(f"Starting server on 0.0.0.0:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
