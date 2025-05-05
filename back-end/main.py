@@ -371,53 +371,48 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     return username
 
 # AI and file processing functions
-# Add to your imports
-import resource
-
-# Set memory limits (Unix systems only)
-try:
-    soft, hard = resource.getrlimit(resource.RLIMIT_AS)
-    resource.setrlimit(resource.RLIMIT_AS, (int(0.8 * soft), hard)
-    logger.info(f"Set memory limit to {0.8 * soft / 1024 / 1024:.2f}MB")
-except:
-    logger.warning("Could not set memory limits (Windows system?)")
-
-# Modify your FAISS index creation
 def create_faiss_index(text: str) -> FAISS:
+    """Create FAISS index with memory-efficient settings"""
+    logger.info("Creating FAISS index")
     try:
-        # Clear memory before starting
-        gc.collect()
+        if not text.strip():
+            logger.error("Empty text provided for FAISS index creation")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No text provided for indexing"
+            )
         
-        # More aggressive text splitting
+        check_memory_usage()
+        
+        # Smaller chunks = less memory
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=80,  # Smaller chunks
-            chunk_overlap=5,
-            length_function=len,
-            separators=["\n\n", "\n", " ", ""]  # Better splitting
+            chunk_size=100,  # Reduced from 200
+            chunk_overlap=10  # Reduced from 30
         )
         
-        # Process in even smaller batches
-        batch_size = 20000  # ~20KB per batch
-        if len(text) > batch_size:
+        # Process in smaller batches
+        if len(text) > 30000:  # ~30KB chunks
+            batches = [text[i:i+30000] for i in range(0, len(text), 30000)]
             vectors = []
             texts = []
             
-            for i in range(0, len(text), batch_size):
-                batch = text[i:i+batch_size]
-                chunks = text_splitter.split_text(batch)
+            for batch in batches:
+                check_memory_usage()
+                gc.collect()
                 
-                if chunks:
-                    embeddings = get_embeddings_model()
-                    batch_vectors = embeddings.embed_documents(chunks)
-                    vectors.extend(batch_vectors)
-                    texts.extend(chunks)
+                chunks = text_splitter.split_text(batch)
+                if not chunks:
+                    continue
                     
-                    # Clear memory between batches
-                    del batch_vectors, chunks
-                    gc.collect()
-                    
-                    # Check memory usage
-                    check_memory_usage()
+                embeddings = get_embeddings_model()
+                batch_vectors = embeddings.embed_documents(chunks)
+                
+                vectors.extend(batch_vectors)
+                texts.extend(chunks)
+                
+                # Clear memory
+                del batch_vectors, chunks
+                gc.collect()
             
             if not texts:
                 raise HTTPException(
@@ -425,25 +420,32 @@ def create_faiss_index(text: str) -> FAISS:
                     detail="No valid text chunks could be processed"
                 )
             
-            return FAISS.from_embeddings(list(zip(texts, vectors)))
+            faiss_index = FAISS.from_embeddings(list(zip(texts, vectors)))
+        else:
+            chunks = text_splitter.split_text(text)
+            if not chunks:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="No valid text chunks could be processed"
+                )
+            embeddings = get_embeddings_model()
+            faiss_index = FAISS.from_texts(chunks, embeddings)
         
-        # Small text processing
-        chunks = text_splitter.split_text(text)
-        if not chunks:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No valid text chunks could be processed"
-            )
-            
-        embeddings = get_embeddings_model()
-        return FAISS.from_texts(chunks, embeddings)
-        
-    except MemoryError:
-        logger.error("Memory error during FAISS index creation")
+        logger.info("FAISS index created successfully")
+        return faiss_index
+    except MemoryError as me:
+        logger.error(f"Memory error creating FAISS index: {str(me)}")
         raise HTTPException(
             status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-            detail="Server memory exhausted processing this document"
+            detail="Server ran out of memory processing this document. Try a smaller file."
         )
+    except Exception as e:
+        logger.error(f"Error creating FAISS index: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Could not process document: {str(e)}"
+        )
+
 def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
     try:
         check_memory_usage()
