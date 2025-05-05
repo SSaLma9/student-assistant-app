@@ -15,4 +15,4 @@ langchain-huggingface
 motor
 psutil
 bcrypt
-huggingface-hub
+huggingface-hub[hf_xet]
