@@ -30,6 +30,9 @@ import gc
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
 import psutil
 import asyncio
+import aiofiles
+from contextlib import asynccontextmanager
+import uuid
 
 # Load environment variables
 load_dotenv()
@@ -49,7 +52,6 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Add CORS middleware
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -57,7 +59,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Configuration
 USER_DATA_DIR = "/app/user_data"
@@ -207,16 +208,14 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     details = "; ".join([f"{err['loc'][-1]}: {err['msg']}" for err in errors])
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        content={"error": "Validation error", "details": details},
-        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
+        content={"error": "Validation error", "details": details}
     )
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
-        content={"error": exc.detail},
-        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
+        content={"error": exc.detail}
     )
 
 @app.exception_handler(MemoryError)
@@ -224,8 +223,7 @@ async def memory_error_handler(request: Request, exc: MemoryError):
     logger.error(f"Memory error occurred: {str(exc)}")
     return JSONResponse(
         status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-        content={"error": "Server ran out of memory. Try a smaller file or upgrade your plan."},
-        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
+        content={"error": "Server ran out of memory. Try a smaller file or upgrade your plan."}
     )
 
 @app.exception_handler(Exception)
@@ -233,8 +231,7 @@ async def general_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unexpected error: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"error": f"Internal server error: {str(exc)}"},
-        headers={"Access-Control-Allow-Origin": FRONTEND_URL}
+        content={"error": f"Internal server error: {str(exc)}"}
     )
 
 # Pydantic models
@@ -284,7 +281,7 @@ async def create_user(username: str, hashed_password: str):
         validate_name(username, "Username")
         existing_user = await get_user(username)
         if existing_user:
-            logger.error("Username already exists")
+            logger.error(f"Username {username} already exists")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Username already exists"
@@ -292,8 +289,9 @@ async def create_user(username: str, hashed_password: str):
         user = {"username": username, "hashed_password": hashed_password}
         await users_collection.insert_one(user)
         logger.info(f"User {username} created successfully")
+        return user
     except DuplicateKeyError:
-        logger.error("Duplicate username")
+        logger.error(f"Duplicate username: {username}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username already exists"
@@ -432,7 +430,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
     return username
 
 # AI and file processing functions
-def create_faiss_index(text: str) -> FAISS:
+async def create_faiss_index(text: str, timeout: int = 300) -> FAISS:
     logger.info("Creating FAISS index")
     try:
         if not text.strip():
@@ -440,37 +438,49 @@ def create_faiss_index(text: str) -> FAISS:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No text provided for indexing"
             )
-        
+
         check_memory_usage()
-        
+
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=50,
-            chunk_overlap=5
+            chunk_size=100,  # Increased chunk size for better context
+            chunk_overlap=20  # Slightly increased overlap
         )
-        
+
         chunks = text_splitter.split_text(text)
         if not chunks:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No valid text chunks could be processed"
             )
-        
+
         embeddings = get_embeddings_model()
-        
-        batch_size = 4
-        vectors = []
-        for i in range(0, len(chunks), batch_size):
-            check_memory_usage()
-            batch_chunks = chunks[i:i + batch_size]
-            batch_vectors = embeddings.embed_documents(batch_chunks)
-            vectors.extend(batch_vectors)
-            del batch_chunks, batch_vectors
-            gc.collect()
-        
+        batch_size = 2  # Reduced batch size to lower memory usage
+
+        async def embed_with_timeout():
+            vectors = []
+            for i in range(0, len(chunks), batch_size):
+                check_memory_usage()
+                batch_chunks = chunks[i:i + batch_size]
+                batch_vectors = await asyncio.to_thread(embeddings.embed_documents, batch_chunks)
+                vectors.extend(batch_vectors)
+                del batch_chunks, batch_vectors
+                gc.collect()
+            return vectors
+
+        try:
+            vectors = await asyncio.wait_for(embed_with_timeout(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error("FAISS indexing timed out")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="FAISS indexing took too long. Try a smaller file."
+            )
+
         text_embeddings = list(zip(chunks, vectors))
-        faiss_index = FAISS.from_embeddings(text_embeddings, embeddings)
+        faiss_index = await asyncio.to_thread(FAISS.from_embeddings, text_embeddings, embeddings)
         logger.info("FAISS index created successfully")
         return faiss_index
+
     except MemoryError as me:
         logger.error(f"Memory error creating FAISS index: {str(me)}")
         raise HTTPException(
@@ -487,10 +497,10 @@ def create_faiss_index(text: str) -> FAISS:
 def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
     try:
         check_memory_usage()
-        
+
         faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
         logger.info(f"Loading FAISS index from {faiss_path}")
-        
+
         if not os.path.exists(faiss_path):
             logger.error(f"FAISS index not found at {faiss_path}")
             raise HTTPException(
@@ -499,7 +509,7 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
             )
 
         embeddings = get_embeddings_model()
-        
+
         try:
             vector_store = FAISS.load_local(
                 faiss_path,
@@ -559,7 +569,8 @@ def validate_pdf(file_path: str) -> None:
                 )
             # Test text extraction on first page
             first_page = reader.pages[0]
-            if not first_page.extract_text():
+            text = first_page.extract_text() or ""
+            if not text.strip():
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="PDF contains no extractable text (likely image-based or scanned)"
@@ -577,49 +588,50 @@ def validate_pdf(file_path: str) -> None:
             detail=f"Could not validate PDF: {str(e)}"
         )
 
-def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> str:
+async def extract_text_from_pdf(file_path: str, username: str, lecture_name: str, timeout: int = 300) -> str:
     logger.info(f"Processing PDF: {file_path}")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
-    
+
     try:
         validate_pdf(file_path)
-        
-        text = ""
-        with open(file_path, 'rb') as f:
-            reader = PdfReader(f)
+
+        text = []
+        async with asynccontextmanager(aiofiles.open(file_path, 'rb')) as f:
+            reader = PdfReader(f.fileobj)
             total_pages = len(reader.pages)
             logger.info(f"PDF has {total_pages} pages")
-            
+
             for page_num in range(total_pages):
                 if page_num % 5 == 0:
                     check_memory_usage()
                     gc.collect()
-                
+
                 page = reader.pages[page_num]
                 try:
                     page_text = page.extract_text() or ""
-                    text += page_text + "\n"
+                    text.append(page_text)
                     if page_num % 10 == 0 and total_pages > 20:
-                        del page_text
                         gc.collect()
                 except Exception as e:
                     logger.warning(f"Page {page_num+1} extraction failed: {str(e)}")
-        
-        if not text.strip():
+                    text.append("")
+
+        full_text = "\n".join(text)
+        if not full_text.strip():
             cleanup_lecture_files(file_path, faiss_path)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="PDF contains no extractable text"
             )
-            
+
         logger.info(f"Creating FAISS index for lecture: {lecture_name}")
-        faiss_index = create_faiss_index(text)
-        
+        faiss_index = await create_faiss_index(full_text, timeout=timeout)
+
         logger.info(f"Saving FAISS index to: {faiss_path}")
         os.makedirs(os.path.dirname(faiss_path), exist_ok=True)
-        
+
         try:
-            faiss_index.save_local(faiss_path)
+            await asyncio.to_thread(faiss_index.save_local, faiss_path)
             logger.info(f"FAISS index saved to {faiss_path}")
         except OSError as e:
             logger.error(f"Failed to save FAISS index to {faiss_path}: {str(e)}")
@@ -628,8 +640,9 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Could not save FAISS index: {str(e)}"
             )
-            
-        return text
+
+        return full_text
+
     except HTTPException as he:
         cleanup_lecture_files(file_path, faiss_path)
         raise he
@@ -732,12 +745,12 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
         lines = exam_text.replace('\r\n', '\n').strip().split('\n')
         current_section = None
         current_question = []
-        
+
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-                
+
             if line.startswith('**MCQs**'):
                 current_section = 'mcqs'
                 continue
@@ -748,7 +761,7 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
                     current_question = []
                 current_section = 'essays'
                 continue
-                
+
             if current_section == 'mcqs':
                 if re.match(r"^\d+\.\s", line):
                     if current_question:
@@ -763,13 +776,13 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
                         essays.append('\n'.join(current_question))
                         current_question = []
                     current_question.append(line)
-                    
+
         if current_question:
             if current_section == 'mcqs':
                 mcqs.append('\n'.join(current_question))
             elif current_section == 'essays':
                 essays.append('\n'.join(current_question))
-                
+
         flattened = []
         if exam_type == "MCQs":
             for idx, q in enumerate(mcqs):
@@ -830,7 +843,7 @@ async def register(credentials: UserCredentials):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username and password required"
         )
-    
+
     hashed_password = hash_password(credentials.password)
     try:
         await create_user(credentials.username, hashed_password)
@@ -880,7 +893,7 @@ async def get_profile(username: str = Depends(get_current_user)):
         logger.info(f"Fetching profile for user: {username}")
         courses = await get_user_courses(username)
         profile = {"username": username, "courses": []}
-        
+
         for course_name in courses:
             lectures = await get_user_lectures(username, course_name)
             lecture_names = [lec["name"] for lec in lectures]
@@ -888,7 +901,7 @@ async def get_profile(username: str = Depends(get_current_user)):
                 "course_name": course_name,
                 "lectures": lecture_names
             })
-        
+
         logger.info(f"Profile retrieved for user: {username}")
         return {"profile": profile}
     except Exception as e:
@@ -935,20 +948,21 @@ async def upload_lecture(
     file: UploadFile = File(...),
     username: str = Depends(get_current_user)
 ):
-    logger.info(f"Received upload request: lecture_name={lecture_name}, course_name={course_name}, file]={file.filename}, size={file.size}")
-    
+    logger.info(f"Received upload request: lecture_name={lecture_name}, course_name={course_name}, file={file.filename}, size={file.size}")
+
     lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
-    
+    temp_file_path = os.path.join(USER_DATA_DIR, username, "lectures", f"temp_{uuid.uuid4().hex}.pdf")
+
     try:
         check_memory_usage()
-        
+
         if not check_volume_writable():
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Storage volume is not writable"
             )
-        
+
         validate_name(lecture_name, "Lecture name")
         validate_name(course_name, "Course name")
 
@@ -962,7 +976,7 @@ async def upload_lecture(
         file.file.seek(0, 2)
         file_size = file.file.tell()
         logger.info(f"File size: {file_size} bytes")
-        
+
         if file_size > MAX_FILE_SIZE:
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
@@ -993,46 +1007,52 @@ async def upload_lecture(
                 detail="Lecture already exists"
             )
 
-        os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
-        logger.info(f"Saving PDF to: {lecture_path}")
+        os.makedirs(os.path.dirname(temp_file_path), exist_ok=True)
+        logger.info(f"Saving temporary PDF to: {temp_file_path}")
         try:
-            with open(lecture_path, "wb") as f:
+            async with aiofiles.open(temp_file_path, 'wb') as f:
                 while chunk := await file.read(8192):
-                    f.write(chunk)
-            logger.info(f"PDF saved successfully: {lecture_path}")
-        except PermissionError as e:
-            logger.error(f"Permission denied writing to {lecture_path}: {str(e)}")
-            cleanup_lecture_files(lecture_path, faiss_path)
+                    await f.write(chunk)
+            logger.info(f"Temporary PDF saved successfully: {temp_file_path}")
+        except (PermissionError, OSError) as e:
+            logger.error(f"Failed to save temporary file to {temp_file_path}: {str(e)}")
+            cleanup_lecture_files(temp_file_path, faiss_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Server file permission error"
-            )
-        except OSError as e:
-            logger.error(f"Failed to save file to {lecture_path}: {str(e)}")
-            cleanup_lecture_files(lecture_path, faiss_path)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"FailedVOLATILE to save file: {str(e)}"
+                detail=f"Failed to save file: {str(e)}"
             )
 
-        lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
+        # Validate and process PDF
+        lecture_text = await extract_text_from_pdf(temp_file_path, username, lecture_name)
+
+        # Move temporary file to final location
+        try:
+            os.rename(temp_file_path, lecture_path)
+            logger.info(f"Renamed temporary file to: {lecture_path}")
+        except OSError as e:
+            logger.error(f"Failed to rename temporary file to {lecture_path}: {str(e)}")
+            cleanup_lecture_files(temp_file_path, faiss_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to finalize file storage: {str(e)}"
+            )
 
         await create_lecture_db(username, course_name, lecture_name, lecture_path)
 
         return {"message": f"Lecture '{lecture_name}' uploaded"}
-    
+
     except HTTPException as he:
-        cleanup_lecture_files(lecture_path, faiss_path)
+        cleanup_lecture_files(temp_file_path, faiss_path)
         raise he
     except MemoryError:
-        cleanup_lecture_files(lecture_path, faiss_path)
+        cleanup_lecture_files(temp_file_path, faiss_path)
         raise HTTPException(
             status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
             detail="Server ran out of memory. Try a smaller PDF or upgrade your plan."
         )
     except Exception as e:
-        logger.error(f"Unexpected error during lecture upload: {str(e)}")
-        cleanup_lecture_files(lecture_path, faiss_path)
+        logger.error(f"Unexpected error during lecture upload: {str(e)}", exc_info=True)
+        cleanup_lecture_files(temp_file_path, faiss_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not upload lecture: {str(e)}"
@@ -1075,9 +1095,9 @@ async def generate_study_content(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Lecture not found"
             )
-        
+
         rag_chain = initialize_rag_chain(username, request.lecture_name)
-        
+
         if request.task == "Custom Question":
             if not request.question:
                 logger.error("Question required for Custom Question task")
@@ -1088,7 +1108,7 @@ async def generate_study_content(
             query = STUDY_PROMPTS[request.task].format(text="", question=request.question)
         else:
             query = STUDY_PROMPTS[request.task].format(text="")
-            
+
         response = rag_chain.invoke({"query": query})
         logger.info(f"Generated study content for task '{request.task}' by user: {username}")
         return {"content": response["result"]}
@@ -1115,7 +1135,7 @@ async def generate_exam(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Lecture not found"
             )
-        
+
         rag_chain = initialize_rag_chain(username, request.lecture_name)
         prompt = EXAM_PROMPT.format(
             text="",
@@ -1146,21 +1166,21 @@ async def grade_answer_endpoint(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Question not found"
             )
-        
+
         lecture_name = question["lecture_name"]
         question_text = question["question"]
         q_type = question["type"]
         options = question["options"]
         correct_answer = question["correct_answer"]
-        
+
         rag_chain = initialize_rag_chain(username, lecture_name)
-        
+
         prompt = GRADING_PROMPT.format(
             question=question_text,
             answer=answer.answer,
             correct_answer=correct_answer if q_type == "mcq" else "No predefined correct answer for essay questions"
         )
-        
+
         response = rag_chain.invoke({"query": prompt})
         logger.info(f"Graded answer for question '{answer.question_id}' by user: {username}")
         return {"feedback": response["result"]}
