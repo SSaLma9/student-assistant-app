@@ -113,7 +113,10 @@ def get_embeddings_model():
                     logger.warning(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
             if embeddings_model is None:
-                raise RuntimeError("Embeddings model failed to initialize after retries")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="AI service temporarily unavailable. Please try again later."
+                )
         except Exception as e:
             logger.error(f"Failed to initialize HuggingFaceEmbeddings: {str(e)}")
             raise HTTPException(
@@ -126,7 +129,10 @@ def get_embeddings_model():
 async def init_mongodb():
     if not MONGODB_URI:
         logger.error("MONGODB_URI environment variable not set")
-        raise Exception("MONGODB_URI not configured")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="MONGODB_URI not configured"
+        )
     max_retries = 5
     retry_delay = 5
     for attempt in range(max_retries):
@@ -141,7 +147,10 @@ async def init_mongodb():
         except (ConnectionFailure, ServerSelectionTimeoutError) as e:
             if attempt == max_retries - 1:
                 logger.error(f"MongoDB connection failed after {max_retries} attempts: {str(e)}")
-                raise Exception(f"MongoDB connection failed: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"MongoDB connection failed: {str(e)}"
+                )
             logger.warning(f"MongoDB connection attempt {attempt + 1} failed: {str(e)}. Retrying in {retry_delay} seconds...")
             await asyncio.sleep(retry_delay)
             retry_delay *= 2
@@ -174,10 +183,16 @@ async def startup_event():
             logger.info("MongoDB indexes created successfully")
         except Exception as e:
             logger.error(f"Failed to create MongoDB indexes: {str(e)}")
-            raise Exception(f"Failed to create MongoDB indexes: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create MongoDB indexes: {str(e)}"
+            )
     except Exception as e:
         logger.error(f"Failed to initialize MongoDB client: {str(e)}")
-        raise Exception(f"MongoDB connection failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"MongoDB connection failed: {str(e)}"
+        )
 
 # Input validation regex
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -583,7 +598,7 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
         except Exception as e:
             logger.error(f"Failed to load FAISS index: {str(e)}")
             raise HTTPException(
-                status_code(status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to load lecture data"
             )
 
@@ -1288,7 +1303,10 @@ async def health_check():
             await client.admin.command('ping')
         else:
             logger.error("MongoDB client not initialized")
-            raise Exception("MongoDB client not initialized")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="MongoDB client not initialized"
+            )
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
         volume_writable = check_volume_writable()
