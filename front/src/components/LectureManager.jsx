@@ -72,72 +72,91 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
   };
 
   // Handle file upload
-  const handleUpload = async (e) => {
-    e.preventDefault();
-    setError('');
-    setMemoryWarning(false);
-    
-    // Validate inputs
-    if (!lectureName.trim()) {
-      setError('Lecture name is required');
-      toast.error('Lecture name is required');
-      return;
-    }
-    
-    const fileError = validateFile(file);
-    if (fileError) {
-      setError(fileError);
-      toast.error(fileError);
-      return;
-    }
-    
-    setLoading(true);
-    
-    try {
-      const formData = new FormData();
-      formData.append('lecture_name', lectureName.trim());
-      formData.append('course_name', selectedCourse);
-      formData.append('file', file);
+ const handleUpload = async (e) => {
+  e.preventDefault();
+  setError('');
+  setMemoryWarning(false);
+  
+  // Validate inputs
+  if (!lectureName.trim()) {
+    setError('Lecture name is required');
+    toast.error('Lecture name is required');
+    return;
+  }
+  
+  // Validate lecture name format
+  if (!/^[a-zA-Z0-9_-]+$/.test(lectureName)) {
+    setError('Only letters, numbers, underscores and hyphens allowed');
+    toast.error('Invalid lecture name format');
+    return;
+  }
 
-      // Upload with progress tracking
-      await axios.post(
-        `${process.env.REACT_APP_API_BASE_URL}/lectures`,
-        formData,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            'Content-Type': 'multipart/form-data'
-          },
-          timeout: 300000, // 5 minute timeout for large files
-          onUploadProgress: (progressEvent) => {
-            const percentCompleted = Math.round(
-              (progressEvent.loaded * 100) / progressEvent.total
-            );
-            console.log(`Upload progress: ${percentCompleted}%`);
-          }
-        }
-      );
+  const fileError = validateFile(file);
+  if (fileError) {
+    setError(fileError);
+    toast.error(fileError);
+    return;
+  }
+  
+  setLoading(true);
+  
+  try {
+    const formData = new FormData();
+    formData.append('lecture_name', lectureName.trim());
+    formData.append('course_name', selectedCourse);
+    formData.append('file', file);
 
-      // Refresh lecture list
-      const response = await axios.get(
-        `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
-        {
-          headers: { Authorization: `Bearer ${token}` },
-          timeout: 10000
+    // Upload with timeout and progress
+    const source = axios.CancelToken.source();
+    const timeout = setTimeout(() => {
+      source.cancel('Upload timed out after 5 minutes');
+    }, 300000);
+
+    await axios.post(
+      `${process.env.REACT_APP_API_BASE_URL}/lectures`,
+      formData,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'multipart/form-data'
+        },
+        cancelToken: source.token,
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round(
+            (progressEvent.loaded * 100) / progressEvent.total
+          );
+          console.log(`Upload progress: ${percentCompleted}%`);
         }
-      );
-      
-      setLectures(response.data.lectures || []);
-      setLectureName('');
-      setFile(null);
-      
-      toast.success('Lecture uploaded successfully!');
-    } catch (err) {
+      }
+    );
+
+    clearTimeout(timeout);
+    
+    // Refresh lecture list
+    const response = await axios.get(
+      `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        timeout: 10000
+      }
+    );
+    
+    setLectures(response.data.lectures || []);
+    setLectureName('');
+    setFile(null);
+    
+    toast.success('Lecture uploaded successfully!');
+  } catch (err) {
+    if (axios.isCancel(err)) {
+      setError('Upload timed out');
+      toast.error('Upload took too long. Try a smaller file.');
+    } else {
       handleApiError(err, 'Failed to upload lecture');
-    } finally {
-      setLoading(false);
     }
-  };
+  } finally {
+    setLoading(false);
+  }
+};
 
   // Handle lecture selection
   const handleSelectLecture = (lecture) => {
