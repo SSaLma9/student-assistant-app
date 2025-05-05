@@ -1,7 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import axiosRetry from 'axios-retry';
 import { toast } from 'react-toastify';
 import { ArrowLeftIcon, DocumentArrowUpIcon } from '@heroicons/react/24/solid';
+
+// Configure axios retry
+axiosRetry(axios, {
+  retries: 3,
+  retryDelay: (retryCount) => retryCount * 1000,
+  retryCondition: (error) => {
+    return (
+      axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+      error.response?.status === 429 ||
+      error.response?.status === 503
+    );
+  }
+});
 
 const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) => {
   const [lectures, setLectures] = useState([]);
@@ -11,7 +25,26 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
   const [error, setError] = useState('');
   const [memoryWarning, setMemoryWarning] = useState(false);
 
-  // Fetch lectures when course changes
+  // Check server resources
+  useEffect(() => {
+    const checkResources = async () => {
+      try {
+        const response = await axios.get(
+          `${process.env.REACT_APP_API_BASE_URL}/resources`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        if (response.data.memory.percent > 80 || response.data.disk.percent > 85) {
+          setMemoryWarning(true);
+          toast.warn('Server resources are high. Consider uploading a smaller file.');
+        }
+      } catch (err) {
+        console.error('Failed to check resources:', err);
+      }
+    };
+    checkResources();
+  }, [token]);
+
+  // Fetch lectures
   useEffect(() => {
     if (!selectedCourse) return;
     
@@ -22,7 +55,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
           `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
           {
             headers: { Authorization: `Bearer ${token}` },
-            timeout: 10000 // 10 second timeout
+            timeout: 10000
           }
         );
         setLectures(response.data.lectures || []);
@@ -36,7 +69,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     fetchLectures();
   }, [selectedCourse, token]);
 
-  // Handle API errors consistently
+  // Handle API errors
   const handleApiError = (err, defaultMessage) => {
     console.error('API Error:', err.response || err);
     
@@ -48,13 +81,12 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     toast.error(errorMessage);
     setError(errorMessage);
     
-    // Special handling for memory errors
     if (err.response?.status === 507) {
       setMemoryWarning(true);
     }
   };
 
-  // Validate file before upload
+  // Validate file
   const validateFile = (file) => {
     if (!file) {
       return 'Please select a file';
@@ -64,99 +96,100 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
       return 'Only PDF files are allowed';
     }
     
-    if (file.size > 5 * 1024 * 1024) { // 5MB
-      return 'File size exceeds 5MB limit';
+    if (file.size > 2 * 1024 * 1024) { // 2MB
+      return 'File size exceeds 2MB limit';
     }
     
     return null;
   };
 
   // Handle file upload
- const handleUpload = async (e) => {
-  e.preventDefault();
-  setError('');
-  setMemoryWarning(false);
-  
-  // Validate inputs
-  if (!lectureName.trim()) {
-    setError('Lecture name is required');
-    toast.error('Lecture name is required');
-    return;
-  }
-  
-  // Validate lecture name format
-  if (!/^[a-zA-Z0-9_-]+$/.test(lectureName)) {
-    setError('Only letters, numbers, underscores and hyphens allowed');
-    toast.error('Invalid lecture name format');
-    return;
-  }
-
-  const fileError = validateFile(file);
-  if (fileError) {
-    setError(fileError);
-    toast.error(fileError);
-    return;
-  }
-  
-  setLoading(true);
-  
-  try {
-    const formData = new FormData();
-    formData.append('lecture_name', lectureName.trim());
-    formData.append('course_name', selectedCourse);
-    formData.append('file', file);
-
-    // Upload with timeout and progress
-    const source = axios.CancelToken.source();
-    const timeout = setTimeout(() => {
-      source.cancel('Upload timed out after 5 minutes');
-    }, 300000);
-
-    await axios.post(
-      `${process.env.REACT_APP_API_BASE_URL}/lectures`,
-      formData,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'multipart/form-data'
-        },
-        cancelToken: source.token,
-        onUploadProgress: (progressEvent) => {
-          const percentCompleted = Math.round(
-            (progressEvent.loaded * 100) / progressEvent.total
-          );
-          console.log(`Upload progress: ${percentCompleted}%`);
-        }
-      }
-    );
-
-    clearTimeout(timeout);
+  const handleUpload = async (e) => {
+    e.preventDefault();
+    setError('');
+    setMemoryWarning(false);
     
-    // Refresh lecture list
-    const response = await axios.get(
-      `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
-      {
-        headers: { Authorization: `Bearer ${token}` },
-        timeout: 10000
-      }
-    );
-    
-    setLectures(response.data.lectures || []);
-    setLectureName('');
-    setFile(null);
-    
-    toast.success('Lecture uploaded successfully!');
-  } catch (err) {
-    if (axios.isCancel(err)) {
-      setError('Upload timed out');
-      toast.error('Upload took too long. Try a smaller file.');
-    } else {
-      handleApiError(err, 'Failed to upload lecture');
+    if (!lectureName.trim()) {
+      setError('Lecture name is required');
+      toast.error('Lecture name is required');
+      return;
     }
-  } finally {
-    setLoading(false);
-  }
-};
+    
+    if (!/^[a-zA-Z0-9_-]+$/.test(lectureName)) {
+      setError('Only letters, numbers, underscores and hyphens allowed');
+      toast.error('Invalid lecture name format');
+      return;
+    }
+
+    const fileError = validateFile(file);
+    if (fileError) {
+      setError(fileError);
+      toast.error(fileError);
+      return;
+    }
+    
+    setLoading(true);
+    
+    try {
+      const formData = new FormData();
+      formData.append('lecture_name', lectureName.trim());
+      formData.append('course_name', selectedCourse);
+      formData.append('file', file);
+
+      // Log FormData
+      for (let [key, value] of formData.entries()) {
+        console.log(`${key}:`, value);
+      }
+
+      const source = axios.CancelToken.source();
+      const timeout = setTimeout(() => {
+        source.cancel('Upload timed out after 2 minutes');
+      }, 120000);
+
+      await axios.post(
+        `${process.env.REACT_APP_API_BASE_URL}/lectures`,
+        formData,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'multipart/form-data'
+          },
+          cancelToken: source.token,
+          onUploadProgress: (progressEvent) => {
+            const percentCompleted = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            );
+            console.log(`Upload progress: ${percentCompleted}%`);
+          }
+        }
+      );
+
+      clearTimeout(timeout);
+      
+      const response = await axios.get(
+        `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 10000
+        }
+      );
+      
+      setLectures(response.data.lectures || []);
+      setLectureName('');
+      setFile(null);
+      
+      toast.success('Lecture uploaded successfully!');
+    } catch (err) {
+      if (axios.isCancel(err)) {
+        setError('Upload timed out');
+        toast.error('Upload took too long. Try a smaller file.');
+      } else {
+        handleApiError(err, 'Failed to upload lecture');
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
 
   // Handle lecture selection
   const handleSelectLecture = (lecture) => {
@@ -179,7 +212,6 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
         </h2>
       </div>
 
-      {/* Memory warning banner */}
       {memoryWarning && (
         <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
           <div className="flex">
@@ -198,7 +230,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
             </div>
             <div className="ml-3">
               <p className="text-sm text-yellow-700">
-                The server is low on memory. Try uploading a smaller file or 
+                The server is low on resources. Try uploading a smaller file or 
                 contact support to upgrade your plan.
               </p>
             </div>
@@ -206,14 +238,12 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
         </div>
       )}
 
-      {/* Error message */}
       {error && (
         <div className="bg-red-50 border-l-4 border-red-400 p-4 mb-6">
           <p className="text-sm text-red-700">{error}</p>
         </div>
       )}
 
-      {/* Upload form */}
       <form onSubmit={handleUpload} className="space-y-6 mb-8">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -259,7 +289,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
                 <p className="pl-1">or drag and drop</p>
               </div>
               <p className="text-xs text-gray-500">
-                PDF up to 5MB
+                PDF up to 2MB
               </p>
               {file && (
                 <p className="text-sm text-gray-900 mt-2">
@@ -307,7 +337,6 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
         </button>
       </form>
 
-      {/* Lectures list */}
       <div>
         <h3 className="text-lg font-semibold text-gray-800 mb-4">
           Available Lectures
