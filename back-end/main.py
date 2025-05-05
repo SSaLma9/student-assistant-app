@@ -159,6 +159,12 @@ async def startup_event():
         questions_collection = db.questions
         logger.info("MongoDB client initialized successfully")
         
+        # Log collection initialization status
+        logger.info(f"Users collection initialized: {users_collection is not None}")
+        logger.info(f"Courses collection initialized: {courses_collection is not None}")
+        logger.info(f"Lectures collection initialized: {lectures_collection is not None}")
+        logger.info(f"Questions collection initialized: {questions_collection is not None}")
+        
         # Create indexes
         try:
             await users_collection.create_index("username", unique=True)
@@ -270,7 +276,7 @@ class AnswerSubmit(BaseModel):
 # MongoDB functions
 async def get_user(username: str) -> Optional[Dict]:
     logger.info(f"Fetching user: {username}")
-    if not users_collection:
+    if users_collection is None:
         logger.error("Users collection not initialized")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -290,6 +296,12 @@ async def get_user(username: str) -> Optional[Dict]:
 
 async def create_user(username: str, hashed_password: str):
     logger.info(f"Creating user: {username}")
+    if users_collection is None:
+        logger.error("Users collection not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized"
+        )
     try:
         validate_name(username, "Username")
         existing_user = await get_user(username)
@@ -318,6 +330,12 @@ async def create_user(username: str, hashed_password: str):
 
 async def get_user_courses(username: str) -> List[str]:
     logger.info(f"Fetching courses for user: {username}")
+    if courses_collection is None:
+        logger.error("Courses collection not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized"
+        )
     try:
         courses = await courses_collection.find({"username": username}).to_list(None)
         course_names = [course["course_name"] for course in courses]
@@ -332,6 +350,12 @@ async def get_user_courses(username: str) -> List[str]:
 
 async def create_course_db(username: str, course_name: str):
     logger.info(f"Creating course '{course_name}' for user: {username}")
+    if courses_collection is None:
+        logger.error("Courses collection not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized"
+        )
     try:
         validate_name(course_name, "Course name")
         existing_course = await courses_collection.find_one({"username": username, "course_name": course_name})
@@ -359,6 +383,12 @@ async def create_course_db(username: str, course_name: str):
 
 async def get_user_lectures(username: str, course_name: str) -> List[Dict]:
     logger.info(f"Fetching lectures for user: {username}, course: {course_name}")
+    if lectures_collection is None:
+        logger.error("Lectures collection not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized"
+        )
     try:
         lectures = await lectures_collection.find({"username": username, "course_name": course_name}).to_list(None)
         lecture_list = [{"name": lec["lecture_name"], "path": lec["file_path"]} for lec in lectures]
@@ -373,6 +403,12 @@ async def get_user_lectures(username: str, course_name: str) -> List[Dict]:
 
 async def create_lecture_db(username: str, course_name: str, lecture_name: str, file_path: str):
     logger.info(f"Creating lecture '{lecture_name}' for user: {username}, course: {course_name}")
+    if lectures_collection is None:
+        logger.error("Lectures collection not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized"
+        )
     try:
         validate_name(lecture_name, "Lecture name")
         existing_lecture = await lectures_collection.find_one({
@@ -547,7 +583,7 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
         except Exception as e:
             logger.error(f"Failed to load FAISS index: {str(e)}")
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                status_code(status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to load lecture data"
             )
 
@@ -767,6 +803,12 @@ STUDY_PROMPTS = {
 }
 
 async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
+    if questions_collection is None:
+        logger.error("Questions collection not initialized")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database not initialized"
+        )
     try:
         mcqs = []
         essays = []
