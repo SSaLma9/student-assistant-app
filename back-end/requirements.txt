@@ -14,3 +14,5 @@ sentence-transformers
 langchain-huggingface
 motor
 psutil
+bcrypt
+huggingface-hub
