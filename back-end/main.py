@@ -65,6 +65,14 @@ MONGODB_URI = os.getenv("MONGODB_URI")
 MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
+# MongoDB client (will be initialized in startup event)
+client = None
+db = None
+users_collection = None
+courses_collection = None
+lectures_collection = None
+questions_collection = None
+
 # Check volume writability
 def check_volume_writable():
     test_file = os.path.join(USER_DATA_DIR, ".write_test")
@@ -134,16 +142,20 @@ async def init_mongodb():
             await asyncio.sleep(retry_delay)
             retry_delay *= 2
 
-try:
-    client = asyncio.get_event_loop().run_until_complete(init_mongodb())
-    db = client.student_assistant
-    users_collection = db.users
-    courses_collection = db.courses
-    lectures_collection = db.lectures
-    questions_collection = db.questions
-    logger.info("MongoDB client initialized successfully")
-    
-    async def create_indexes():
+# Initialize MongoDB on startup
+@app.on_event("startup")
+async def startup_event():
+    global client, db, users_collection, courses_collection, lectures_collection, questions_collection
+    try:
+        client = await init_mongodb()
+        db = client.student_assistant
+        users_collection = db.users
+        courses_collection = db.courses
+        lectures_collection = db.lectures
+        questions_collection = db.questions
+        logger.info("MongoDB client initialized successfully")
+        
+        # Create indexes
         try:
             await users_collection.create_index("username", unique=True)
             await courses_collection.create_index([("username", 1), ("course_name", 1)], unique=True)
@@ -152,11 +164,9 @@ try:
             logger.info("MongoDB indexes created successfully")
         except Exception as e:
             logger.error(f"Failed to create MongoDB indexes: {str(e)}")
-    
-    asyncio.create_task(create_indexes())
-except Exception as e:
-    logger.error(f"Failed to initialize MongoDB client: {str(e)}")
-    raise Exception(f"MongoDB connection failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Failed to initialize MongoDB client: {str(e)}")
+        raise Exception(f"MongoDB connection failed: {str(e)}")
 
 # Input validation regex
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -924,7 +934,7 @@ async def upload_lecture(
     file: UploadFile = File(...),
     username: str = Depends(get_current_user)
 ):
-    logger.info(f"Received upload request: lecture_name={lecture_name}, course_name={course_name}, file={file.filename}, size={file.size}")
+    logger.info(f"Received upload request: lecture_name={lecture_name}, course_name={course_name}, file]={file.filename}, size={file.size}")
     
     lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
@@ -1001,7 +1011,7 @@ async def upload_lecture(
             cleanup_lecture_files(lecture_path, faiss_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to save file: {str(e)}"
+                detail=f"FailedVOLATILE to save file: {str(e)}"
             )
 
         lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
