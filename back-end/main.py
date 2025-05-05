@@ -31,7 +31,6 @@ from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, Dupli
 import psutil
 import asyncio
 import aiofiles
-from contextlib import asynccontextmanager
 import uuid
 
 # Load environment variables
@@ -596,8 +595,8 @@ async def extract_text_from_pdf(file_path: str, username: str, lecture_name: str
         validate_pdf(file_path)
 
         text = []
-        async with asynccontextmanager(aiofiles.open(file_path, 'rb')) as f:
-            reader = PdfReader(f.fileobj)
+        async with aiofiles.open(file_path, 'rb') as f:
+            reader = PdfReader(await f.read())
             total_pages = len(reader.pages)
             logger.info(f"PDF has {total_pages} pages")
 
