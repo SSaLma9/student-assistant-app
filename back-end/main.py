@@ -49,10 +49,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Add CORS middleware
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "https://student-assistant-frontend-production.up.railway.app/"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -97,37 +97,28 @@ def get_embeddings_model():
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    logger.info(f"Attempt {attempt + 1}: Loading sentence-transformers/all-MiniLM-L6-v2")
                     embeddings_model = HuggingFaceEmbeddings(
                         model_name="sentence-transformers/all-MiniLM-L6-v2",
                         model_kwargs={'device': 'cpu'},
                         encode_kwargs={
                             'normalize_embeddings': True,
-                            'batch_size': 2  # Reduced batch size
+                            'batch_size': 4
                         }
                     )
-                    logger.info("HuggingFaceEmbeddings initialized successfully")
                     break
                 except Exception as e:
-                    logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
                     if attempt == max_retries - 1:
                         raise
                     wait_time = (attempt + 1) * 5
-                    logger.warning(f"Retrying in {wait_time} seconds...")
+                    logger.warning(f"Attempt {attempt + 1} failed. Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
             if embeddings_model is None:
                 raise RuntimeError("Embeddings model failed to initialize after retries")
-        except MemoryError as me:
-            logger.error(f"Memory error initializing HuggingFaceEmbeddings: {str(me)}")
-            raise HTTPException(
-                status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-                detail="Server ran out of memory during model initialization."
-            )
         except Exception as e:
             logger.error(f"Failed to initialize HuggingFaceEmbeddings: {str(e)}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"AI service unavailable: {str(e)}"
+                detail="AI service temporarily unavailable. Please try again later."
             )
     return embeddings_model
 
@@ -457,45 +448,28 @@ def create_faiss_index(text: str) -> FAISS:
             chunk_overlap=5
         )
         
-        logger.info("Splitting text into chunks")
         chunks = text_splitter.split_text(text)
         if not chunks:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No valid text chunks could be processed"
             )
-        logger.info(f"Created {len(chunks)} text chunks")
         
         embeddings = get_embeddings_model()
         
-        batch_size = 2  # Reduced batch size
+        batch_size = 4
         vectors = []
-        logger.info(f"Embedding {len(chunks)} chunks in batches of {batch_size}")
         for i in range(0, len(chunks), batch_size):
             check_memory_usage()
             batch_chunks = chunks[i:i + batch_size]
-            logger.info(f"Processing batch {i//batch_size + 1}: {len(batch_chunks)} chunks")
-            try:
-                batch_vectors = embeddings.embed_documents(batch_chunks)
-                vectors.extend(batch_vectors)
-                logger.info(f"Embedded batch {i//batch_size + 1}")
-            except Exception as e:
-                logger.error(f"Error embedding batch {i//batch_size + 1}: {str(e)}")
-                raise
+            batch_vectors = embeddings.embed_documents(batch_chunks)
+            vectors.extend(batch_vectors)
             del batch_chunks, batch_vectors
             gc.collect()
-            logger.info(f"Cleaned up batch {i//batch_size + 1}")
         
-        logger.info("Creating text-embedding pairs")
         text_embeddings = list(zip(chunks, vectors))
-        check_memory_usage()
-        
-        logger.info("Building FAISS index")
         faiss_index = FAISS.from_embeddings(text_embeddings, embeddings)
         logger.info("FAISS index created successfully")
-        del text_embeddings, vectors, chunks
-        gc.collect()
-        check_memory_usage()
         return faiss_index
     except MemoryError as me:
         logger.error(f"Memory error creating FAISS index: {str(me)}")
@@ -504,7 +478,7 @@ def create_faiss_index(text: str) -> FAISS:
             detail="Server ran out of memory. Try a smaller file."
         )
     except Exception as e:
-        logger.error(f"Error creating FAISS index: {str(e)}", exc_info=True)
+        logger.error(f"Error creating FAISS index: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create FAISS index: {str(e)}"
@@ -961,7 +935,7 @@ async def upload_lecture(
     file: UploadFile = File(...),
     username: str = Depends(get_current_user)
 ):
-    logger.info(f"Received upload request: lecture_name={lecture_name}, course_name={course_name}, file={file.filename}, size={file.size}")
+    logger.info(f"Received upload request: lecture_name={lecture_name}, course_name={course_name}, file]={file.filename}, size={file.size}")
     
     lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
@@ -1038,7 +1012,7 @@ async def upload_lecture(
             cleanup_lecture_files(lecture_path, faiss_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to save file: {str(e)}"
+                detail=f"FailedVOLATILE to save file: {str(e)}"
             )
 
         lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
