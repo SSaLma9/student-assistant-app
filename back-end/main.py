@@ -27,8 +27,8 @@ import logging
 import json
 import time
 import gc
-from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
-import psutil  # For memory monitoring
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
+import psutil
 
 # Load environment variables
 load_dotenv()
@@ -50,17 +50,17 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update to frontend URL in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Configuration
-USER_DATA_DIR = "/app/user_data"  # Railway volume mount path
+USER_DATA_DIR = "/app/user_data"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+MAX_FILE_SIZE = 2 * 1024 * 1024  # Reduced to 2MB
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 # Lazy initialize embedding model
@@ -73,13 +73,12 @@ def get_embeddings_model():
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    # Initialize with reduced memory footprint
                     embeddings_model = HuggingFaceEmbeddings(
                         model_name="sentence-transformers/all-MiniLM-L6-v2",
                         model_kwargs={'device': 'cpu'},
                         encode_kwargs={
                             'normalize_embeddings': True,
-                            'batch_size': 8  # Reduced from default
+                            'batch_size': 4  # Reduced
                         }
                     )
                     break
@@ -99,7 +98,7 @@ def get_embeddings_model():
             )
     return embeddings_model
 
-# MongoDB setup with connection timeout
+# MongoDB setup
 try:
     client = motor.motor_asyncio.AsyncIOMotorClient(
         MONGODB_URI,
@@ -136,11 +135,9 @@ def validate_name(name: str, field: str) -> None:
         )
 
 def check_memory_usage():
-    """Check current memory usage and raise error if too high"""
     mem = psutil.virtual_memory()
     logger.info(f"Memory usage: {mem.percent}% (Total: {mem.total/1024/1024:.2f}MB, Used: {mem.used/1024/1024:.2f}MB)")
-    
-    if mem.percent > 85:  # More conservative threshold
+    if mem.percent > 85:
         logger.error(f"Memory usage too high: {mem.percent}%")
         raise HTTPException(
             status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
@@ -148,7 +145,6 @@ def check_memory_usage():
         )
 
 def cleanup_lecture_files(lecture_path: str, faiss_path: str):
-    """Remove partial files and FAISS index on failure"""
     try:
         if os.path.exists(lecture_path):
             os.remove(lecture_path)
@@ -159,7 +155,7 @@ def cleanup_lecture_files(lecture_path: str, faiss_path: str):
     except Exception as e:
         logger.warning(f"Failed to clean up files: {str(e)}")
 
-# Custom exception handlers
+# Exception handlers
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors = exc.errors()
@@ -195,6 +191,7 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={"error": "Internal server error"},
         headers={"Access-Control-Allow-Origin": "*"}
     )
+
 # Pydantic models
 class UserCredentials(BaseModel):
     username: str
@@ -281,7 +278,7 @@ async def create_course_db(username: str, course_name: str):
             )
         course = {"username": username, "course_name": course_name}
         await courses_collection.insert_one(course)
-        logger.info(f"Course '{course_name}' created successfully for user: {username}")
+        logger.info(f"Course '{course_name}' created successfully")
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -313,7 +310,7 @@ async def create_lecture_db(username: str, course_name: str, lecture_name: str, 
             "lecture_name": lecture_name
         })
         if existing_lecture:
-            logger.error("Lecture already exists")
+            logger.error(f"Lecture '{lecture_name}' already exists")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Lecture already exists"
@@ -325,7 +322,13 @@ async def create_lecture_db(username: str, course_name: str, lecture_name: str, 
             "file_path": file_path
         }
         await lectures_collection.insert_one(lecture)
-        logger.info(f"Lecture '{lecture_name}' created successfully for user: {username}")
+        logger.info(f"Lecture '{lecture_name}' created successfully")
+    except DuplicateKeyError as e:
+        logger.error(f"Duplicate lecture name: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Lecture name already exists"
+        )
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -372,11 +375,9 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
 
 # AI and file processing functions
 def create_faiss_index(text: str) -> FAISS:
-    """Create FAISS index with memory-efficient settings"""
     logger.info("Creating FAISS index")
     try:
         if not text.strip():
-            logger.error("Empty text provided for FAISS index creation")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No text provided for indexing"
@@ -384,63 +385,41 @@ def create_faiss_index(text: str) -> FAISS:
         
         check_memory_usage()
         
-        # Smaller chunks = less memory
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=100,  # Reduced from 200
-            chunk_overlap=10  # Reduced from 30
+            chunk_size=50,  # Reduced for memory
+            chunk_overlap=5
         )
         
-        # Process in smaller batches
-        if len(text) > 30000:  # ~30KB chunks
-            batches = [text[i:i+30000] for i in range(0, len(text), 30000)]
-            vectors = []
-            texts = []
-            
-            for batch in batches:
-                check_memory_usage()
-                gc.collect()
-                
-                chunks = text_splitter.split_text(batch)
-                if not chunks:
-                    continue
-                    
-                embeddings = get_embeddings_model()
-                batch_vectors = embeddings.embed_documents(chunks)
-                
-                vectors.extend(batch_vectors)
-                texts.extend(chunks)
-                
-                # Clear memory
-                del batch_vectors, chunks
-                gc.collect()
-            
-            if not texts:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No valid text chunks could be processed"
-                )
-            
-            faiss_index = FAISS.from_embeddings(list(zip(texts, vectors)))
-        else:
-            chunks = text_splitter.split_text(text)
-            if not chunks:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No valid text chunks could be processed"
-                )
-            embeddings = get_embeddings_model()
-            faiss_index = FAISS.from_texts(chunks, embeddings)
+        chunks = text_splitter.split_text(text)
+        if not chunks:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No valid text chunks could be processed"
+            )
         
+        embeddings = get_embeddings_model()
+        
+        batch_size = 4
+        vectors = []
+        for i in range(0, len(chunks), batch_size):
+            check_memory_usage()
+            batch_chunks = chunks[i:i + batch_size]
+            batch_vectors = embeddings.embed_documents(batch_chunks)
+            vectors.extend(batch_vectors)
+            del batch_chunks, batch_vectors
+            gc.collect()
+        
+        faiss_index = FAISS.from_embeddings(list(zip(chunks, vectors)))
         logger.info("FAISS index created successfully")
         return faiss_index
     except MemoryError as me:
         logger.error(f"Memory error creating FAISS index: {str(me)}")
         raise HTTPException(
             status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-            detail="Server ran out of memory processing this document. Try a smaller file."
+            detail="Server ran out of memory. Try a smaller file."
         )
     except Exception as e:
-        logger.error(f"Error creating FAISS index: {str(e)}", exc_info=True)
+        logger.error(f"Error creating FAISS index: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not process document: {str(e)}"
@@ -479,11 +458,11 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
             temperature=0.7,
             groq_api_key=GROQ_API_KEY,
             model_name="llama3-70b-8192",
-            max_tokens=512  # Reduced from 1024
+            max_tokens=512
         )
 
         retriever = vector_store.as_retriever(
-            search_kwargs={"k": 1}  # Reduced from 2
+            search_kwargs={"k": 1}
         )
 
         check_memory_usage()
@@ -498,14 +477,13 @@ def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error initializing RAG chain: {str(e)}", exc_info=True)
+        logger.error(f"Error initializing RAG chain: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="AI service temporarily unavailable - try again later"
         )
 
 def validate_pdf(file_path: str) -> None:
-    """Validate PDF readability before processing"""
     try:
         with open(file_path, 'rb') as f:
             reader = PdfReader(f)
@@ -519,6 +497,13 @@ def validate_pdf(file_path: str) -> None:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="PDF is empty or invalid"
                 )
+            # Test text extraction on first page
+            first_page = reader.pages[0]
+            if not first_page.extract_text():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="PDF contains no extractable text (likely image-based or scanned)"
+                )
     except PdfReadError as e:
         logger.error(f"PDF validation failed: {str(e)}")
         raise HTTPException(
@@ -531,13 +516,12 @@ def validate_pdf(file_path: str) -> None:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not validate PDF: {str(e)}"
         )
+
 def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> str:
-    """Stream PDF processing with memory optimizations"""
     logger.info(f"Processing PDF: {file_path}")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
     
     try:
-        # Validate PDF first
         validate_pdf(file_path)
         
         text = ""
@@ -545,9 +529,8 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
             reader = PdfReader(f)
             total_pages = len(reader.pages)
             
-            # Process in chunks to reduce memory
             for page_num in range(total_pages):
-                if page_num % 5 == 0:  # Check memory every 5 pages
+                if page_num % 5 == 0:
                     check_memory_usage()
                     gc.collect()
                 
@@ -555,8 +538,6 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
                 try:
                     page_text = page.extract_text() or ""
                     text += page_text + "\n"
-                    
-                    # Clear memory periodically
                     if page_num % 10 == 0 and total_pages > 20:
                         del page_text
                         gc.collect()
@@ -567,7 +548,7 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
             cleanup_lecture_files(file_path, faiss_path)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="PDF contains no extractable text (e.g., image-based or scanned document)"
+                detail="PDF contains no extractable text"
             )
             
         logger.info(f"Creating FAISS index for lecture: {lecture_name}")
@@ -578,7 +559,7 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
         
         try:
             faiss_index.save_local(faiss_path)
-            logger.debug(f"FAISS index saved to {faiss_path}")
+            logger.info(f"FAISS index saved to {faiss_path}")
         except OSError as e:
             logger.error(f"Failed to save FAISS index to {faiss_path}: {str(e)}")
             cleanup_lecture_files(file_path, faiss_path)
@@ -599,7 +580,7 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
             detail="Server ran out of memory. Try a smaller PDF or upgrade your plan."
         )
     except Exception as e:
-        logger.error(f"Error processing PDF {file_path}: {str(e)}", exc_info=True)
+        logger.error(f"Error processing PDF {file_path}: {str(e)}")
         cleanup_lecture_files(file_path, faiss_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -772,7 +753,7 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
                 )
         return flattened
     except Exception as e:
-        logger.error(f"Error parsing exam: {str(e)}", exc_info=True)
+        logger.error(f"Error parsing exam: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not parse exam content"
@@ -801,7 +782,7 @@ async def register(credentials: UserCredentials):
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error(f"Unexpected error during registration: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error during registration: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not complete registration: {str(e)}"
@@ -826,7 +807,7 @@ async def login(credentials: UserCredentials):
         logger.info(f"User {credentials.username} logged in successfully")
         return {"token": access_token}
     except Exception as e:
-        logger.error(f"Unexpected error during login: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error during login: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not complete login: {str(e)}"
@@ -850,7 +831,7 @@ async def get_profile(username: str = Depends(get_current_user)):
         logger.info(f"Profile retrieved for user: {username}")
         return {"profile": profile}
     except Exception as e:
-        logger.error(f"Error retrieving profile for {username}: {str(e)}", exc_info=True)
+        logger.error(f"Error retrieving profile for {username}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not retrieve profile: {str(e)}"
@@ -880,7 +861,7 @@ async def list_courses(username: str = Depends(get_current_user)):
         logger.info(f"Retrieved courses for user: {username}")
         return {"courses": courses}
     except Exception as e:
-        logger.error(f"Error retrieving courses: {str(e)}", exc_info=True)
+        logger.error(f"Error retrieving courses: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not retrieve courses: {str(e)}"
@@ -893,7 +874,7 @@ async def upload_lecture(
     file: UploadFile = File(...),
     username: str = Depends(get_current_user)
 ):
-    logger.info(f"Uploading lecture '{lecture_name}' for course '{course_name}' by user '{username}'")
+    logger.info(f"Received upload request: lecture_name={lecture_name}, course_name={course_name}, file={file.filename}, size={file.size}")
     
     lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
@@ -901,11 +882,9 @@ async def upload_lecture(
     try:
         check_memory_usage()
         
-        # Validate inputs
         validate_name(lecture_name, "Lecture name")
         validate_name(course_name, "Course name")
 
-        # Validate file type
         if file.content_type != "application/pdf":
             logger.error(f"Invalid file type: {file.content_type}")
             raise HTTPException(
@@ -913,7 +892,6 @@ async def upload_lecture(
                 detail="Only PDF files are allowed"
             )
 
-        # Validate file size
         file.file.seek(0, 2)
         file_size = file.file.tell()
         logger.info(f"File size: {file_size} bytes")
@@ -930,7 +908,6 @@ async def upload_lecture(
             )
         file.file.seek(0)
 
-        # Check course exists
         courses = await get_user_courses(username)
         if course_name not in courses:
             raise HTTPException(
@@ -938,7 +915,6 @@ async def upload_lecture(
                 detail="Course not found"
             )
 
-        # Check lecture doesn't exist
         existing_lecture = await lectures_collection.find_one({
             "username": username,
             "course_name": course_name,
@@ -950,24 +926,28 @@ async def upload_lecture(
                 detail="Lecture already exists"
             )
 
-        # Save file
         os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
         try:
             with open(lecture_path, "wb") as f:
-                # Stream write in chunks to avoid loading entire file in memory
-                while chunk := await file.read(8192):  # 8KB chunks
+                while chunk := await file.read(8192):
                     f.write(chunk)
+        except PermissionError as e:
+            logger.error(f"Permission denied writing to {lecture_path}: {str(e)}")
+            cleanup_lecture_files(lecture_path, faiss_path)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Server file permission error"
+            )
         except OSError as e:
+            logger.error(f"Failed to save file to {lecture_path}: {str(e)}")
             cleanup_lecture_files(lecture_path, faiss_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to save file: {str(e)}"
             )
 
-        # Process PDF
         lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
 
-        # Store in DB
         await create_lecture_db(username, course_name, lecture_name, lecture_path)
 
         return {"message": f"Lecture '{lecture_name}' uploaded"}
@@ -982,12 +962,13 @@ async def upload_lecture(
             detail="Server ran out of memory. Try a smaller PDF or upgrade your plan."
         )
     except Exception as e:
-        logger.error(f"Unexpected error during lecture upload: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error during lecture upload: {str(e)}")
         cleanup_lecture_files(lecture_path, faiss_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not upload lecture: {str(e)}"
         )
+
 @app.get("/lectures/{course_name}", response_model=dict)
 async def list_lectures(course_name: str, username: str = Depends(get_current_user)):
     try:
@@ -1003,7 +984,7 @@ async def list_lectures(course_name: str, username: str = Depends(get_current_us
         logger.info(f"Retrieved lectures for course '{course_name}' by user: {username}")
         return {"lectures": lecture_names}
     except Exception as e:
-        logger.error(f"Error retrieving lectures: {str(e)}", exc_info=True)
+        logger.error(f"Error retrieving lectures: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not retrieve lectures: {str(e)}"
@@ -1043,7 +1024,7 @@ async def generate_study_content(
         logger.info(f"Generated study content for task '{request.task}' by user: {username}")
         return {"content": response["result"]}
     except Exception as e:
-        logger.error(f"Error generating study content: {str(e)}", exc_info=True)
+        logger.error(f"Error generating study content: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not generate study content: {str(e)}"
@@ -1077,7 +1058,7 @@ async def generate_exam(
         logger.info(f"Generated exam for lecture '{request.lecture_name}' by user: {username}")
         return {"questions": questions}
     except Exception as e:
-        logger.error(f"Error generating exam: {str(e)}", exc_info=True)
+        logger.error(f"Error generating exam: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not generate exam: {str(e)}"
@@ -1115,7 +1096,7 @@ async def grade_answer_endpoint(
         logger.info(f"Graded answer for question '{answer.question_id}' by user: {username}")
         return {"feedback": response["result"]}
     except Exception as e:
-        logger.error(f"Error grading answer: {str(e)}", exc_info=True)
+        logger.error(f"Error grading answer: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not grade answer: {str(e)}"
@@ -1125,16 +1106,16 @@ async def grade_answer_endpoint(
 async def health_check():
     try:
         await client.admin.command('ping')
-        logger.info("Health check: MongoDB connection successful")
+        logger.info("MongoDB connection successful")
         return {"status": "healthy", "mongodb": "connected"}
     except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-        logger.error(f"Health check failed: MongoDB connection error: {str(e)}")
+        logger.error(f"MongoDB connection error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Health check failed: MongoDB connection error: {str(e)}"
+            detail=f"MongoDB connection error: {str(e)}"
         )
     except Exception as e:
-        logger.error(f"Health check failed: {str(e)}", exc_info=True)
+        logger.error(f"Health check failed: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Health check failed: {str(e)}"
@@ -1143,6 +1124,7 @@ async def health_check():
 @app.get("/resources")
 async def resource_check():
     mem = psutil.virtual_memory()
+    disk = psutil.disk_usage('/')
     return {
         "memory": {
             "total": f"{mem.total/1024/1024:.2f} MB",
@@ -1150,7 +1132,13 @@ async def resource_check():
             "used": f"{mem.used/1024/1024:.2f} MB",
             "percent": mem.percent
         },
-        "status": "ok" if mem.percent < 85 else "warning"
+        "disk": {
+            "total": f"{disk.total/1024/1024:.2f} MB",
+            "free": f"{disk.free/1024/1024:.2f} MB",
+            "used": f"{disk.used/1024/1024:.2f} MB",
+            "percent": disk.percent
+        },
+        "status": "ok" if mem.percent < 85 and disk.percent < 90 else "warning"
     }
 
 if __name__ == "__main__":
