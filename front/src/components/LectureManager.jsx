@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { toast } from 'react-toastify';
-import { ArrowLeftIcon } from '@heroicons/react/24/solid';
+import { ArrowLeftIcon, DocumentArrowUpIcon } from '@heroicons/react/24/solid';
 
 const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) => {
   const [lectures, setLectures] = useState([]);
@@ -9,132 +9,323 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [memoryWarning, setMemoryWarning] = useState(false);
 
+  // Fetch lectures when course changes
   useEffect(() => {
     if (!selectedCourse) return;
+    
     const fetchLectures = async () => {
       setLoading(true);
       try {
-        const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
+        const response = await axios.get(
+          `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 10000 // 10 second timeout
+          }
+        );
         setLectures(response.data.lectures || []);
       } catch (err) {
-        toast.error(err.response?.data?.error || 'Failed to fetch lectures');
+        handleApiError(err, 'Failed to fetch lectures');
       } finally {
         setLoading(false);
       }
     };
+    
     fetchLectures();
   }, [selectedCourse, token]);
 
+  // Handle API errors consistently
+  const handleApiError = (err, defaultMessage) => {
+    console.error('API Error:', err.response || err);
+    
+    const errorMessage = err.response?.data?.error || 
+      (err.code === 'ECONNABORTED' ? 'Request timed out' : 
+      err.message.includes('Network Error') ? 'Network connection failed' : 
+      defaultMessage);
+      
+    toast.error(errorMessage);
+    setError(errorMessage);
+    
+    // Special handling for memory errors
+    if (err.response?.status === 507) {
+      setMemoryWarning(true);
+    }
+  };
+
+  // Validate file before upload
+  const validateFile = (file) => {
+    if (!file) {
+      return 'Please select a file';
+    }
+    
+    if (file.type !== 'application/pdf') {
+      return 'Only PDF files are allowed';
+    }
+    
+    if (file.size > 5 * 1024 * 1024) { // 5MB
+      return 'File size exceeds 5MB limit';
+    }
+    
+    return null;
+  };
+
+  // Handle file upload
   const handleUpload = async (e) => {
     e.preventDefault();
-    if (!file || !lectureName || !selectedCourse) {
-      setError('Please provide lecture name, course, and PDF file');
-      toast.error('Please provide lecture name, course, and PDF file');
+    setError('');
+    setMemoryWarning(false);
+    
+    // Validate inputs
+    if (!lectureName.trim()) {
+      setError('Lecture name is required');
+      toast.error('Lecture name is required');
       return;
     }
+    
+    const fileError = validateFile(file);
+    if (fileError) {
+      setError(fileError);
+      toast.error(fileError);
+      return;
+    }
+    
     setLoading(true);
-    setError('');
-    const formData = new FormData();
-    formData.append('lecture_name', lectureName);
-    formData.append('course_name', selectedCourse);
-    formData.append('file', file); // Changed from 'pdf' to 'file' to match backend expectation
-
+    
     try {
-      await axios.post(`${process.env.REACT_APP_API_BASE_URL}/lectures`, formData, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'multipart/form-data'
+      const formData = new FormData();
+      formData.append('lecture_name', lectureName.trim());
+      formData.append('course_name', selectedCourse);
+      formData.append('file', file);
+
+      // Upload with progress tracking
+      await axios.post(
+        `${process.env.REACT_APP_API_BASE_URL}/lectures`,
+        formData,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'multipart/form-data'
+          },
+          timeout: 300000, // 5 minute timeout for large files
+          onUploadProgress: (progressEvent) => {
+            const percentCompleted = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total
+            );
+            console.log(`Upload progress: ${percentCompleted}%`);
+          }
         }
-      });
+      );
 
+      // Refresh lecture list
+      const response = await axios.get(
+        `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          timeout: 10000
+        }
+      );
       
-      const response = await axios.get(`${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
       setLectures(response.data.lectures || []);
-
       setLectureName('');
       setFile(null);
+      
       toast.success('Lecture uploaded successfully!');
     } catch (err) {
-      console.error('Upload error:', err.response || err);
-      setError(err.response?.data?.error || 'Failed to upload lecture');
-      toast.error(err.response?.data?.error || 'Failed to upload lecture');
+      handleApiError(err, 'Failed to upload lecture');
     } finally {
       setLoading(false);
     }
   };
 
+  // Handle lecture selection
   const handleSelectLecture = (lecture) => {
     setSelectedLecture(lecture);
     setView('study');
   };
 
   return (
-    <div className="bg-white p-6 sm:p-8 rounded-xl shadow-lg animate-fade-in">
-      <div className="flex items-center mb-4 sm:mb-6">
+    <div className="bg-white p-6 rounded-xl shadow-lg animate-fade-in max-w-3xl mx-auto">
+      <div className="flex items-center mb-6">
         <button
           onClick={() => setView('courses')}
-          className="text-indigo-600 hover:text-indigo-800 mr-2 sm:mr-4"
+          className="text-indigo-600 hover:text-indigo-800 mr-4"
+          aria-label="Back to courses"
         >
-          <ArrowLeftIcon className="h-5 sm:h-6 w-5 sm:w-6" />
+          <ArrowLeftIcon className="h-6 w-6" />
         </button>
-        <h2 className="text-xl sm:text-2xl font-bold text-gray-800">Manage Lectures for {selectedCourse}</h2>
+        <h2 className="text-2xl font-bold text-gray-800">
+          Lectures for {selectedCourse}
+        </h2>
       </div>
-      {error && <p className="text-red-500 mb-2 sm:mb-4">{error}</p>}
-      <form onSubmit={handleUpload} className="space-y-4 sm:space-y-6 mb-4 sm:mb-8">
+
+      {/* Memory warning banner */}
+      {memoryWarning && (
+        <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6">
+          <div className="flex">
+            <div className="flex-shrink-0">
+              <svg
+                className="h-5 w-5 text-yellow-400"
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path
+                  fillRule="evenodd"
+                  d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z"
+                  clipRule="evenodd"
+                />
+              </svg>
+            </div>
+            <div className="ml-3">
+              <p className="text-sm text-yellow-700">
+                The server is low on memory. Try uploading a smaller file or 
+                contact support to upgrade your plan.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Error message */}
+      {error && (
+        <div className="bg-red-50 border-l-4 border-red-400 p-4 mb-6">
+          <p className="text-sm text-red-700">{error}</p>
+        </div>
+      )}
+
+      {/* Upload form */}
+      <form onSubmit={handleUpload} className="space-y-6 mb-8">
         <div>
-          <label className="block text-sm font-medium text-gray-700">Lecture Name</label>
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Lecture Name
+          </label>
           <input
             type="text"
             value={lectureName}
             onChange={(e) => setLectureName(e.target.value)}
-            className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
+            placeholder="e.g., Introduction to Algorithms"
             required
+            pattern="^[a-zA-Z0-9_-]+$"
+            title="Only letters, numbers, underscores, and hyphens allowed"
           />
+          <p className="mt-1 text-xs text-gray-500">
+            Only letters, numbers, underscores (_), and hyphens (-) allowed
+          </p>
         </div>
+
         <div>
-          <label className="block text-sm font-medium text-gray-700">Upload Lecture PDF</label>
-          <input
-            type="file"
-            accept="application/pdf"
-            onChange={(e) => setFile(e.target.files[0])}
-            className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-lg"
-            required
-          />
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            PDF File
+          </label>
+          <div className="mt-1 flex justify-center px-6 pt-5 pb-6 border-2 border-gray-300 border-dashed rounded-lg">
+            <div className="space-y-1 text-center">
+              <DocumentArrowUpIcon className="mx-auto h-12 w-12 text-gray-400" />
+              <div className="flex text-sm text-gray-600">
+                <label
+                  htmlFor="file-upload"
+                  className="relative cursor-pointer bg-white rounded-md font-medium text-indigo-600 hover:text-indigo-500 focus-within:outline-none"
+                >
+                  <span>Upload a file</span>
+                  <input
+                    id="file-upload"
+                    name="file-upload"
+                    type="file"
+                    className="sr-only"
+                    accept="application/pdf"
+                    onChange={(e) => setFile(e.target.files?.[0] || null)}
+                  />
+                </label>
+                <p className="pl-1">or drag and drop</p>
+              </div>
+              <p className="text-xs text-gray-500">
+                PDF up to 5MB
+              </p>
+              {file && (
+                <p className="text-sm text-gray-900 mt-2">
+                  Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(2)}MB)
+                </p>
+              )}
+            </div>
+          </div>
         </div>
+
         <button
           type="submit"
           disabled={loading}
-          className={`w-full bg-indigo-600 text-white py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
+          className={`w-full bg-indigo-600 text-white py-3 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${
+            loading ? 'opacity-70 cursor-not-allowed' : ''
+          }`}
         >
           {loading ? (
-            <svg className="animate-spin h-4 sm:h-5 w-4 sm:w-5 mr-1 sm:mr-2 text-white" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-            </svg>
-          ) : null}
-          Upload Lecture
+            <>
+              <svg
+                className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                ></circle>
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                ></path>
+              </svg>
+              Processing...
+            </>
+          ) : (
+            'Upload Lecture'
+          )}
         </button>
       </form>
+
+      {/* Lectures list */}
       <div>
-        <h3 className="text-lg font-semibold text-gray-800 mb-2 sm:mb-4">Available Lectures</h3>
-        {loading ? (
-          <p className="text-gray-600">Loading lectures...</p>
+        <h3 className="text-lg font-semibold text-gray-800 mb-4">
+          Available Lectures
+        </h3>
+        {loading && lectures.length === 0 ? (
+          <div className="flex justify-center items-center py-8">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600"></div>
+          </div>
         ) : lectures.length === 0 ? (
-          <p className="text-gray-600">No lectures available. Upload one above!</p>
+          <div className="bg-gray-50 p-6 rounded-lg text-center">
+            <p className="text-gray-600">
+              No lectures available. Upload your first lecture above!
+            </p>
+          </div>
         ) : (
-          <ul className="space-y-2">
+          <ul className="space-y-3">
             {lectures.map((lecture) => (
               <li
                 key={lecture.lecture_name || lecture}
-                className="bg-indigo-50 p-3 sm:p-4 rounded-lg hover:bg-indigo-100 cursor-pointer transition"
+                className="bg-gray-50 p-4 rounded-lg hover:bg-indigo-50 cursor-pointer transition flex justify-between items-center"
                 onClick={() => handleSelectLecture(lecture)}
               >
-                {lecture.lecture_name || lecture}
+                <span className="font-medium text-gray-800">
+                  {lecture.lecture_name || lecture}
+                </span>
+                <svg
+                  className="h-5 w-5 text-indigo-600"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                    clipRule="evenodd"
+                  />
+                </svg>
               </li>
             ))}
           </ul>
