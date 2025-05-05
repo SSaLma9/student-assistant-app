@@ -40,7 +40,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     const formData = new FormData();
     formData.append('lecture_name', lectureName);
     formData.append('course_name', selectedCourse);
-    formData.append('pdf', file); // 
+    formData.append('file', file); // Changed from 'pdf' to 'file' to match backend expectation
 
     try {
       await axios.post(`${process.env.REACT_APP_API_BASE_URL}/lectures`, formData, {
@@ -60,6 +60,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
       setFile(null);
       toast.success('Lecture uploaded successfully!');
     } catch (err) {
+      console.error('Upload error:', err.response || err);
       setError(err.response?.data?.error || 'Failed to upload lecture');
       toast.error(err.response?.data?.error || 'Failed to upload lecture');
     } finally {
