@@ -73,10 +73,14 @@ def get_embeddings_model():
             max_retries = 3
             for attempt in range(max_retries):
                 try:
+                    # Initialize with reduced memory footprint
                     embeddings_model = HuggingFaceEmbeddings(
                         model_name="sentence-transformers/all-MiniLM-L6-v2",
                         model_kwargs={'device': 'cpu'},
-                        encode_kwargs={'normalize_embeddings': True}
+                        encode_kwargs={
+                            'normalize_embeddings': True,
+                            'batch_size': 8  # Reduced from default
+                        }
                     )
                     break
                 except Exception as e:
@@ -132,12 +136,15 @@ def validate_name(name: str, field: str) -> None:
         )
 
 def check_memory_usage():
+    """Check current memory usage and raise error if too high"""
     mem = psutil.virtual_memory()
-    if mem.percent > 85:  # Lowered from 90% to be more conservative
+    logger.info(f"Memory usage: {mem.percent}% (Total: {mem.total/1024/1024:.2f}MB, Used: {mem.used/1024/1024:.2f}MB)")
+    
+    if mem.percent > 85:  # More conservative threshold
         logger.error(f"Memory usage too high: {mem.percent}%")
         raise HTTPException(
             status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-            detail="Server memory overloaded, please try again later"
+            detail="Server memory overloaded, please try again later or use a smaller file"
         )
 
 def cleanup_lecture_files(lecture_path: str, faiss_path: str):
@@ -171,6 +178,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         headers={"Access-Control-Allow-Origin": "*"}
     )
 
+@app.exception_handler(MemoryError)
+async def memory_error_handler(request: Request, exc: MemoryError):
+    logger.error(f"Memory error occurred: {str(exc)}")
+    return JSONResponse(
+        status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+        content={"error": "Server ran out of memory. Try a smaller file or upgrade your plan."},
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
+
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     logger.error(f"Unexpected error: {str(exc)}", exc_info=True)
@@ -179,7 +195,6 @@ async def general_exception_handler(request: Request, exc: Exception):
         content={"error": "Internal server error"},
         headers={"Access-Control-Allow-Origin": "*"}
     )
-
 # Pydantic models
 class UserCredentials(BaseModel):
     username: str
@@ -357,6 +372,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)) -> str:
 
 # AI and file processing functions
 def create_faiss_index(text: str) -> FAISS:
+    """Create FAISS index with memory-efficient settings"""
     logger.info("Creating FAISS index")
     try:
         if not text.strip():
@@ -368,31 +384,34 @@ def create_faiss_index(text: str) -> FAISS:
         
         check_memory_usage()
         
+        # Smaller chunks = less memory
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=150,  # Reduced from 200
-            chunk_overlap=20  # Reduced from 30
+            chunk_size=100,  # Reduced from 200
+            chunk_overlap=10  # Reduced from 30
         )
         
         # Process in smaller batches
-        if len(text) > 50000:  # ~50KB
-            batches = [text[i:i+50000] for i in range(0, len(text), 50000)]
+        if len(text) > 30000:  # ~30KB chunks
+            batches = [text[i:i+30000] for i in range(0, len(text), 30000)]
             vectors = []
             texts = []
             
             for batch in batches:
                 check_memory_usage()
+                gc.collect()
                 
                 chunks = text_splitter.split_text(batch)
                 if not chunks:
                     continue
+                    
                 embeddings = get_embeddings_model()
                 batch_vectors = embeddings.embed_documents(chunks)
                 
                 vectors.extend(batch_vectors)
                 texts.extend(chunks)
                 
-                del batch_vectors
-                del chunks
+                # Clear memory
+                del batch_vectors, chunks
                 gc.collect()
             
             if not texts:
@@ -414,13 +433,18 @@ def create_faiss_index(text: str) -> FAISS:
         
         logger.info("FAISS index created successfully")
         return faiss_index
+    except MemoryError as me:
+        logger.error(f"Memory error creating FAISS index: {str(me)}")
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail="Server ran out of memory processing this document. Try a smaller file."
+        )
     except Exception as e:
         logger.error(f"Error creating FAISS index: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not process document: {str(e)}"
         )
-
 def initialize_rag_chain(username: str, lecture_name: str) -> RetrievalQA:
     try:
         check_memory_usage()
@@ -506,8 +530,8 @@ def validate_pdf(file_path: str) -> None:
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not validate PDF: {str(e)}"
         )
-
 def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> str:
+    """Stream PDF processing with memory optimizations"""
     logger.info(f"Processing PDF: {file_path}")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
     
@@ -520,15 +544,18 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
             reader = PdfReader(f)
             total_pages = len(reader.pages)
             
+            # Process in chunks to reduce memory
             for page_num in range(total_pages):
-                if page_num % 5 == 0:
+                if page_num % 5 == 0:  # Check memory every 5 pages
                     check_memory_usage()
+                    gc.collect()
                 
                 page = reader.pages[page_num]
                 try:
                     page_text = page.extract_text() or ""
                     text += page_text + "\n"
                     
+                    # Clear memory periodically
                     if page_num % 10 == 0 and total_pages > 20:
                         del page_text
                         gc.collect()
@@ -563,6 +590,13 @@ def extract_text_from_pdf(file_path: str, username: str, lecture_name: str) -> s
     except HTTPException as he:
         cleanup_lecture_files(file_path, faiss_path)
         raise he
+    except MemoryError as me:
+        cleanup_lecture_files(file_path, faiss_path)
+        logger.error(f"Memory error processing PDF: {str(me)}")
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail="Server ran out of memory. Try a smaller PDF or upgrade your plan."
+        )
     except Exception as e:
         logger.error(f"Error processing PDF {file_path}: {str(e)}", exc_info=True)
         cleanup_lecture_files(file_path, faiss_path)
@@ -869,7 +903,6 @@ async def upload_lecture(
         # Validate inputs
         validate_name(lecture_name, "Lecture name")
         validate_name(course_name, "Course name")
-        logger.debug(f"Input validation passed: lecture_name={lecture_name}, course_name={course_name}")
 
         # Validate file type
         if file.content_type != "application/pdf":
@@ -878,87 +911,75 @@ async def upload_lecture(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Only PDF files are allowed"
             )
-        logger.debug(f"File type validated: {file.content_type}")
 
         # Validate file size
         file.file.seek(0, 2)
         file_size = file.file.tell()
         logger.info(f"File size: {file_size} bytes")
+        
         if file_size > MAX_FILE_SIZE:
-            logger.error(f"File too large: {file_size} bytes, max is {MAX_FILE_SIZE} bytes")
             raise HTTPException(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"File too large. Max size is {MAX_FILE_SIZE/1024/1024}MB"
             )
         if file_size == 0:
-            logger.error("Empty file uploaded")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Uploaded file is empty"
             )
         file.file.seek(0)
-        logger.debug("File size validated")
 
-        # Check if course exists
+        # Check course exists
         courses = await get_user_courses(username)
         if course_name not in courses:
-            logger.error(f"Course '{course_name}' not found for user '{username}'")
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Course not found"
             )
-        logger.debug(f"Course '{course_name}' exists")
 
-        # Check if lecture already exists
+        # Check lecture doesn't exist
         existing_lecture = await lectures_collection.find_one({
             "username": username,
             "course_name": course_name,
             "lecture_name": lecture_name
         })
         if existing_lecture:
-            logger.error(f"Lecture '{lecture_name}' already exists for course '{course_name}'")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Lecture already exists"
             )
 
-        # Prepare file storage path
-        logger.info(f"Preparing to save lecture to {lecture_path}")
+        # Save file
         os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
-        
-        # Save the uploaded file
-        logger.debug(f"Writing file to {lecture_path}")
         try:
             with open(lecture_path, "wb") as f:
-                content = await file.read()
-                logger.info(f"Writing {len(content)} bytes to {lecture_path}")
-                f.write(content)
-            logger.debug(f"File successfully saved to {lecture_path}")
-            
-            del content
-            gc.collect()
+                # Stream write in chunks to avoid loading entire file in memory
+                while chunk := await file.read(8192):  # 8KB chunks
+                    f.write(chunk)
         except OSError as e:
-            logger.error(f"Failed to write file to {lecture_path}: {str(e)}")
             cleanup_lecture_files(lecture_path, faiss_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to save file: {str(e)}"
             )
 
-        # Process the PDF
-        logger.info(f"Extracting text from PDF at {lecture_path}")
+        # Process PDF
         lecture_text = extract_text_from_pdf(lecture_path, username, lecture_name)
-        logger.debug(f"PDF text extraction completed, length: {len(lecture_text)} characters")
 
-        # Store lecture in database
-        logger.info(f"Storing lecture metadata in MongoDB")
+        # Store in DB
         await create_lecture_db(username, course_name, lecture_name, lecture_path)
-        logger.info(f"Lecture '{lecture_name}' successfully uploaded and stored")
 
         return {"message": f"Lecture '{lecture_name}' uploaded"}
+    
     except HTTPException as he:
         cleanup_lecture_files(lecture_path, faiss_path)
         raise he
+    except MemoryError:
+        cleanup_lecture_files(lecture_path, faiss_path)
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail="Server ran out of memory. Try a smaller PDF or upgrade your plan."
+        )
     except Exception as e:
         logger.error(f"Unexpected error during lecture upload: {str(e)}", exc_info=True)
         cleanup_lecture_files(lecture_path, faiss_path)
@@ -966,7 +987,6 @@ async def upload_lecture(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Could not upload lecture: {str(e)}"
         )
-
 @app.get("/lectures/{course_name}", response_model=dict)
 async def list_lectures(course_name: str, username: str = Depends(get_current_user)):
     try:
