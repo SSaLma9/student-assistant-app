@@ -616,25 +616,46 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
 def get_chat_model():
     try:
         if not GROQ_API_KEY:
-            logger.error("GROQ_API_KEY not set")
+            logger.error("GROQ_API_KEY not set in environment")
             raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
+        
+        # Validate key format
+        stripped_key = GROQ_API_KEY.strip()
+        if not stripped_key.startswith("gsk_") or len(stripped_key) < 20:
+            logger.error(f"Invalid GROQ_API_KEY format: {stripped_key[:5]}...")
+            raise HTTPException(status_code=500, detail="Invalid GROQ_API_KEY format")
+        
+        logger.debug(f"Attempting to use GROQ_API_KEY: {stripped_key[:5]}...{stripped_key[-5:]}")
+        
+        # Test API key with minimal request
+        client = Groq(api_key=stripped_key)
+        try:
+            response = client.chat.completions.create(
+                model="llama3-70b-8192",
+                messages=[{"role": "user", "content": "Test"}],
+                max_tokens=10
+            )
+            logger.info(f"GROQ_API_KEY validated successfully: {response.id}")
+        except APIError as e:
+            logger.error(f"GROQ_API_KEY validation failed: {str(e)}. Response: {getattr(e, 'response', 'No response')}")
+            raise HTTPException(status_code=503, detail=f"Invalid GROQ_API_KEY: {str(e)}")
+        
+        # Revalidate environment to catch runtime changes
+        runtime_key = os.getenv("GROQ_API_KEY", "").strip()
+        if runtime_key != stripped_key:
+            logger.error(f"Environment GROQ_API_KEY mismatch. Loaded: {stripped_key[:5]}..., Runtime: {runtime_key[:5]}...")
+            raise HTTPException(status_code=500, detail="GROQ_API_KEY environment mismatch")
+        
         chat_model = ChatGroq(
             temperature=0.7,
-            groq_api_key=GROQ_API_KEY,
+            groq_api_key=stripped_key,
             model_name="llama3-70b-8192",
-            max_tokens=256  # Reduced for stability
-        )
-        # Test model initialization
-        client = Groq(api_key=GROQ_API_KEY)
-        client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=[{"role": "user", "content": "Test"}],
-            max_tokens=10
+            max_tokens=256
         )
         logger.debug("ChatGroq initialized successfully")
         return chat_model
     except APIError as e:
-        logger.error(f"ChatGroq API error: {str(e)}")
+        logger.error(f"ChatGroq API error: {str(e)}. Response: {getattr(e, 'response', 'No response')}")
         raise HTTPException(status_code=503, detail=f"AI service error: {str(e)}")
     except Exception as e:
         logger.error(f"Failed to initialize ChatGroq: {str(e)}", exc_info=True)
