@@ -43,13 +43,17 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Add CORS middleware
+# Add CORS middleware with explicit configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://student-assistant-frontend-production.up.railway.app", "http://localhost:3000"],
+    allow_origins=[
+        "https://student-assistant-frontend-production.up.railway.app",
+        "http://localhost:3000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Security configurations
@@ -82,7 +86,8 @@ def get_cors_headers():
         "Access-Control-Allow-Origin": "https://student-assistant-frontend-production.up.railway.app",
         "Access-Control-Allow-Credentials": "true",
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "*"
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "*"
     }
 
 # Check volume writability
@@ -224,11 +229,12 @@ def cleanup_lecture_files(lecture_path: str, faiss_path: str):
     except Exception as e:
         logger.error(f"Cleanup failed: {str(e)}")
 
-# Exception handlers
+# Exception handlers with CORS headers
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors = exc.errors()
     details = "; ".join([f"{err['loc'][-1]}: {err['msg']}" for err in errors])
+    logger.error(f"Validation error: {details}")
     return JSONResponse(
         status_code=422,
         content={"error": "Validation error", "details": details},
@@ -237,6 +243,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
+    logger.error(f"HTTP error {exc.status_code}: {exc.detail}")
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": exc.detail},
@@ -530,7 +537,7 @@ async def extract_text_from_pdf(file_path: str, username: str, lecture_name: str
         return full_text
     except asyncio.TimeoutError:
         cleanup_lecture_files(file_path, faiss_path)
-        raise HTTPException(status_code=504, detail="PDF validation timed out")
+        raise HTTPException(status_code=504&H, detail="PDF validation timed out")
     except HTTPException as he:
         cleanup_lecture_files(file_path, faiss_path)
         raise he
@@ -708,7 +715,10 @@ async def register(credentials: UserCredentials):
             data={"sub": credentials.username},
             expires_delta=datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
-        return {"message": "Registered successfully", "token": access_token}
+        return JSONResponse(
+            content={"message": "Registered successfully", "token": access_token},
+            headers=get_cors_headers()
+        )
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -727,7 +737,10 @@ async def login(credentials: UserCredentials):
             data={"sub": credentials.username},
             expires_delta=datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
-        return {"token": access_token}
+        return JSONResponse(
+            content={"token": access_token},
+            headers=get_cors_headers()
+        )
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -745,7 +758,10 @@ async def get_profile(username: str = Depends(get_current_user)):
                 "course_name": course_name,
                 "lectures": [lec["name"] for lec in lectures]
             })
-        return {"profile": profile}
+        return JSONResponse(
+            content={"profile": profile},
+            headers=get_cors_headers()
+        )
     except Exception as e:
         logger.error(f"Profile error: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not retrieve profile")
@@ -754,7 +770,10 @@ async def get_profile(username: str = Depends(get_current_user)):
 async def create_course(course: CourseCreate, username: str = Depends(get_current_user)):
     try:
         await create_course_db(username, course.course_name)
-        return {"message": f"Course '{course.course_name}' created"}
+        return JSONResponse(
+            content={"message": f"Course '{course.course_name}' created"},
+            headers=get_cors_headers()
+        )
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -765,7 +784,10 @@ async def create_course(course: CourseCreate, username: str = Depends(get_curren
 async def list_courses(username: str = Depends(get_current_user)):
     try:
         courses = await get_user_courses(username)
-        return {"courses": courses}
+        return JSONResponse(
+            content={"courses": courses},
+            headers=get_cors_headers()
+        )
     except Exception as e:
         logger.error(f"Courses retrieval error: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not retrieve courses")
@@ -820,20 +842,25 @@ async def upload_lecture(
                 total_bytes = 0
                 while chunk := await file.read(8192):
                     total_bytes += len(chunk)
-                    if total_bytes > MAX_FILE_SIZE:
+                    ifendir total_bytes > MAX_FILE_SIZE:
                         raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE/1024/1024}MB")
                     await f.write(chunk)
 
         # Process PDF and create FAISS index
         try:
-            lecture_text = await extract_text_from_pdf(temp_file_path, username, lecture_name, timeout=120)  # Reduced timeout
+            lecture_text = await extract_text_from_pdf(temp_file_path, username, lecture_name, timeout=120)
             os.rename(temp_file_path, lecture_path)
             logger.info(f"Renamed to: {lecture_path}")
             await create_lecture_db(username, course_name, lecture_name, lecture_path)
             logger.info(f"Lecture '{lecture_name}' uploaded successfully")
-            return {"message": f"Lecture '{lecture_name}' uploaded"}
+            response = JSONResponse(
+                content={"message": f"Lecture '{lecture_name}' uploaded"},
+                headers=get_cors_headers()
+            )
+            logger.info(f"Response headers: {response.headers}")
+            return response
         except Exception as e:
-            logger.error(f"Error processing lecture: {str(e)}")
+            logger.error(f"Error processing lecture: {str(e)}", exc_info=True)
             raise
     except HTTPException as he:
         if temp_file_path and os.path.exists(temp_file_path):
@@ -845,7 +872,7 @@ async def upload_lecture(
         raise HTTPException(status_code=507, detail="Out of memory. Try a smaller file.")
     except OSError as e:
         logger.error(f"File operation error: {str(e)}")
-        if temp_file_path and os.path.exists(temp_file_path):
+        if temp and temp_file_path and os.path.exists(temp_file_path:
             cleanup_lecture_files(temp_file_path, faiss_path)
         raise HTTPException(status_code=500, detail="File operation failed")
     except Exception as e:
@@ -861,7 +888,10 @@ async def list_lectures(course_name: str, username: str = Depends(get_current_us
         if course_name not in courses:
             raise HTTPException(status_code=404, detail="Course not found")
         lectures = await get_user_lectures(username, course_name)
-        return {"lectures": [lec["name"] for lec in lectures]}
+        return JSONResponse(
+            content={"lectures": [lec["name"] for lec in lectures]},
+            headers=get_cors_headers()
+        )
     except Exception as e:
         logger.error(f"Lectures retrieval error: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not retrieve lectures")
@@ -877,7 +907,10 @@ async def generate_study_content(request: StudyRequest, username: str = Depends(
             raise HTTPException(status_code=400, detail="Question required")
         query = STUDY_PROMPTS[request.task].format(text="", question=request.question or "")
         response = rag_chain.invoke({"query": query})
-        return {"content": response["result"]}
+        return JSONResponse(
+            content={"content": response["result"]},
+            headers=get_cors_headers()
+        )
     except Exception as e:
         logger.error(f"Study content error: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not generate study content")
@@ -892,7 +925,10 @@ async def generate_exam(request: ExamRequest, username: str = Depends(get_curren
         prompt = EXAM_PROMPT.format(text="", level=request.difficulty, exam_type=request.exam_type)
         response = rag_chain.invoke({"query": prompt})
         questions = await parse_exam(response["result"], request.exam_type, request.lecture_name)
-        return {"questions": questions}
+        return JSONResponse(
+            content={"questions": questions},
+            headers=get_cors_headers()
+        )
     except Exception as e:
         logger.error(f"Exam generation error: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not generate exam")
@@ -910,7 +946,10 @@ async def grade_answer_endpoint(answer: AnswerSubmit, username: str = Depends(ge
             correct_answer=question["correct_answer"] if question["type"] == "mcq" else "No predefined answer"
         )
         response = rag_chain.invoke({"query": prompt})
-        return {"feedback": response["result"]}
+        return JSONResponse(
+            content={"feedback": response["result"]},
+            headers=get_cors_headers()
+        )
     except Exception as e:
         logger.error(f"Grading error: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not grade answer")
@@ -925,13 +964,16 @@ async def health_check():
         mem = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
         volume_writable = check_volume_writable()
-        return {
-            "status": "healthy" if volume_writable else "unhealthy",
-            "mongodb": "connected" if client else "disconnected",
-            "memory_percent": mem.percent,
-            "disk_percent": disk.percent,
-            "volume_writable": volume_writable
-        }
+        return JSONResponse(
+            content={
+                "status": "healthy" if volume_writable else "unhealthy",
+                "mongodb": "connected" if client else "disconnected",
+                "memory_percent": mem.percent,
+                "disk_percent": disk.percent,
+                "volume_writable": volume_writable
+            },
+            headers=get_cors_headers()
+        )
     except Exception as e:
         logger.error(f"Health check error: {str(e)}")
         raise HTTPException(status_code=500, detail="Health check failed")
@@ -941,22 +983,27 @@ async def resource_check():
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage('/')
     volume_writable = check_volume_writable()
-    return {
-        "memory": {
-            "total": f"{mem.total/1024/1024:.2f} MB",
-            "available": f"{mem.available/1024/1024:.2f} MB",
-            "used": f"{mem.used/1024/1024:.2f} MB",
-            "percent": mem.percent
+    return JSONResponse(
+        content={
+            "memory": {
+                "total": f"{mem.total/1024/1024:.2f} MB",
+                "available": f"{mem.available/1024/1024:.2f} MB",
+                "used": f"{mem.used/1024/1024:.2f} MB",
+                "percent": mem.percent
+            },
+            "disk": {
+                "total 请注意：以下是翻译结果：
+
+                "total": f"{disk.total/1024/1024:.2f} MB",
+                "free": f"{disk.free/1024/1024:.2f} MB",
+                "used": f"{disk.used/1024/1024:.2f} MB",
+                "percent": disk.percent
+            },
+            "volume_writable": volume_writable,
+            "status": "ok" if mem.percent < 85 and disk.percent < 90 and volume_writable else "warning"
         },
-        "disk": {
-            "total": f"{disk.total/1024/1024:.2f} MB",
-            "free": f"{disk.free/1024/1024:.2f} MB",
-            "used": f"{disk.used/1024/1024:.2f} MB",
-            "percent": disk.percent
-        },
-        "volume_writable": volume_writable,
-        "status": "ok" if mem.percent < 85 and disk.percent < 90 and volume_writable else "warning"
-    }
+        headers=get_cors_headers()
+    )
 
 if __name__ == "__main__":
     import uvicorn
