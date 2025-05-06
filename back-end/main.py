@@ -411,10 +411,10 @@ def validate_pdf(file_path: str) -> None:
         logger.error(f"PDF validation error: {str(e)}")
         raise HTTPException(status_code=500, detail="PDF validation failed")
 
-async def extract_text_from_pdf(file_path: str, timeout: int = 30) -> str:
+async def extract_text_from_pdf(file_path: str, timeout: int = 60) -> str:
     logger.debug(f"Extracting text from PDF: {file_path}")
     try:
-        await asyncio.wait_for(asyncio.to_thread(validate_pdf, file_path), timeout=15)
+        await asyncio.wait_for(asyncio.to_thread(validate_pdf, file_path), timeout=30)
         text = []
         with open(file_path, 'rb') as f:
             reader = PdfReader(f)
