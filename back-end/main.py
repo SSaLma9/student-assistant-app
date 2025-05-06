@@ -59,7 +59,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 USER_DATA_DIR = "/app/user_data"
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
-MAX_FILE_SIZE = 1 * 1024 * 1024  # 1MB
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_PDF_PAGES = 20  # Reduced page limit
 MAX_TEXT_LENGTH = 10000  # Max characters for ChatGroq input
 os.makedirs(USER_DATA_DIR, exist_ok=True)
