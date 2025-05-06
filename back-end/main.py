@@ -780,60 +780,79 @@ async def upload_lecture(
     logger.info(f"Upload request: lecture={lecture_name}, course={course_name}, file={file.filename}, size={file.size}")
     lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
     faiss_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}_faiss")
+    temp_file_path = None
 
     try:
+        # Resource checks
         check_memory_usage()
         check_disk_space()
         if not check_volume_writable():
             raise HTTPException(status_code=500, detail="Storage not writable")
+
+        # Validate inputs
         validate_name(lecture_name, "Lecture name")
         validate_name(course_name, "Course name")
         if file.content_type != "application/pdf":
             raise HTTPException(status_code=400, detail="Only PDF files allowed")
+
+        # Check file size
         file_size = file.size
         if file_size > MAX_FILE_SIZE:
             raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE/1024/1024}MB")
         if file_size == 0:
             raise HTTPException(status_code=400, detail="Empty file")
+
+        # Verify course exists
         courses = await get_user_courses(username)
         if course_name not in courses:
             raise HTTPException(status_code=404, detail="Course not found")
+
+        # Check if lecture exists
         if await lectures_collection.find_one({"username": username, "course_name": course_name, "lecture_name": lecture_name}):
             raise HTTPException(status_code=400, detail="Lecture exists")
 
-        # Use NamedTemporaryFile for secure temp file
+        # Save file to temporary location
         os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
         with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(lecture_path), suffix=".pdf") as temp_file:
             temp_file_path = temp_file.name
             logger.info(f"Saving temp PDF: {temp_file_path}")
             async with aiofiles.open(temp_file_path, 'wb') as f:
+                total_bytes = 0
                 while chunk := await file.read(8192):
+                    total_bytes += len(chunk)
+                    if total_bytes > MAX_FILE_SIZE:
+                        raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE/1024/1024}MB")
                     await f.write(chunk)
 
+        # Process PDF and create FAISS index
         try:
-            lecture_text = await extract_text_from_pdf(temp_file_path, username, lecture_name)
+            lecture_text = await extract_text_from_pdf(temp_file_path, username, lecture_name, timeout=120)  # Reduced timeout
             os.rename(temp_file_path, lecture_path)
             logger.info(f"Renamed to: {lecture_path}")
             await create_lecture_db(username, course_name, lecture_name, lecture_path)
+            logger.info(f"Lecture '{lecture_name}' uploaded successfully")
             return {"message": f"Lecture '{lecture_name}' uploaded"}
         except Exception as e:
-            logger.error(f"Error finalizing upload: {str(e)}")
-            cleanup_lecture_files(temp_file_path, faiss_path)
+            logger.error(f"Error processing lecture: {str(e)}")
             raise
     except HTTPException as he:
-        cleanup_lecture_files(None, faiss_path)
+        if temp_file_path and os.path.exists(temp_file_path):
+            cleanup_lecture_files(temp_file_path, faiss_path)
         raise he
     except MemoryError:
-        cleanup_lecture_files(None, faiss_path)
-        raise HTTPException(status_code=507, detail="Out of memory")
+        if temp_file_path and os.path.exists(temp_file_path):
+            cleanup_lecture_files(temp_file_path, faiss_path)
+        raise HTTPException(status_code=507, detail="Out of memory. Try a smaller file.")
     except OSError as e:
         logger.error(f"File operation error: {str(e)}")
-        cleanup_lecture_files(None, faiss_path)
+        if temp_file_path and os.path.exists(temp_file_path):
+            cleanup_lecture_files(temp_file_path, faiss_path)
         raise HTTPException(status_code=500, detail="File operation failed")
     except Exception as e:
         logger.error(f"Upload error: {str(e)}", exc_info=True)
-        cleanup_lecture_files(None, faiss_path)
-        raise HTTPException(status_code=500, detail="Upload failed")
+        if temp_file_path and os.path.exists(temp_file_path):
+            cleanup_lecture_files(temp_file_path, faiss_path)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.get("/lectures/{course_name}", response_model=dict)
 async def list_lectures(course_name: str, username: str = Depends(get_current_user)):
