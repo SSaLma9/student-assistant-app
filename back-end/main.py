@@ -537,7 +537,7 @@ async def extract_text_from_pdf(file_path: str, username: str, lecture_name: str
         return full_text
     except asyncio.TimeoutError:
         cleanup_lecture_files(file_path, faiss_path)
-        raise HTTPException(status_code=504&H, detail="PDF validation timed out")
+        raise HTTPException(status_code=504, detail="PDF validation timed out")
     except HTTPException as he:
         cleanup_lecture_files(file_path, faiss_path)
         raise he
@@ -842,7 +842,7 @@ async def upload_lecture(
                 total_bytes = 0
                 while chunk := await file.read(8192):
                     total_bytes += len(chunk)
-                    ifendir total_bytes > MAX_FILE_SIZE:
+                    if total_bytes > MAX_FILE_SIZE:
                         raise HTTPException(status_code=413, detail=f"File too large. Max: {MAX_FILE_SIZE/1024/1024}MB")
                     await f.write(chunk)
 
@@ -872,7 +872,7 @@ async def upload_lecture(
         raise HTTPException(status_code=507, detail="Out of memory. Try a smaller file.")
     except OSError as e:
         logger.error(f"File operation error: {str(e)}")
-        if temp and temp_file_path and os.path.exists(temp_file_path:
+        if temp_file_path and os.path.exists(temp_file_path):
             cleanup_lecture_files(temp_file_path, faiss_path)
         raise HTTPException(status_code=500, detail="File operation failed")
     except Exception as e:
@@ -992,8 +992,6 @@ async def resource_check():
                 "percent": mem.percent
             },
             "disk": {
-                "total 请注意：以下是翻译结果：
-
                 "total": f"{disk.total/1024/1024:.2f} MB",
                 "free": f"{disk.free/1024/1024:.2f} MB",
                 "used": f"{disk.used/1024/1024:.2f} MB",
