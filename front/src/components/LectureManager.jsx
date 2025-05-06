@@ -10,9 +10,8 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [memoryWarning, setMemoryWarning] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
 
-  // Check server resources periodically
+  // Check server resources
   useEffect(() => {
     const checkResources = async () => {
       try {
@@ -28,16 +27,13 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
         console.error('Failed to check resources:', err);
       }
     };
-
     checkResources();
-    const interval = setInterval(checkResources, 30000); // Check every 30 seconds
-    return () => clearInterval(interval);
   }, [token]);
 
   // Fetch lectures
   useEffect(() => {
     if (!selectedCourse) return;
-
+    
     const fetchLectures = async () => {
       setLoading(true);
       try {
@@ -45,7 +41,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
           `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
           {
             headers: { Authorization: `Bearer ${token}` },
-            timeout: 10000,
+            timeout: 10000
           }
         );
         setLectures(response.data.lectures || []);
@@ -55,36 +51,22 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
         setLoading(false);
       }
     };
-
+    
     fetchLectures();
   }, [selectedCourse, token]);
 
   // Handle API errors
   const handleApiError = (err, defaultMessage) => {
     console.error('API Error:', err.response || err);
-
-    const errorMap = {
-      'Only PDF files allowed': 'Please upload a valid PDF file.',
-      'File too large': 'File exceeds 2MB limit. Choose a smaller file.',
-      'PDF is encrypted': 'The PDF is encrypted and cannot be processed.',
-      'PDF is empty': 'The PDF is empty or invalid.',
-      'No extractable text': 'The PDF contains no readable text (likely scanned).',
-      'Out of memory': 'Server ran out of memory. Try a smaller file.',
-      'Storage not writable': 'Server storage issue. Try again later.',
-      'Lecture exists': 'A lecture with this name already exists.'
-    };
-
-    const errorMessage =
-      errorMap[err.response?.data?.error] ||
-      (err.code === 'ECONNABORTED'
-        ? 'Request timed out'
-        : err.message.includes('Network Error')
-        ? 'Network connection failed'
-        : defaultMessage);
-
+    
+    const errorMessage = err.response?.data?.error || 
+      (err.code === 'ECONNABORTED' ? 'Request timed out' : 
+      err.message.includes('Network Error') ? 'Network connection failed' : 
+      defaultMessage);
+      
     toast.error(errorMessage);
     setError(errorMessage);
-
+    
     if (err.response?.status === 507) {
       setMemoryWarning(true);
     }
@@ -95,34 +77,16 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     if (!file) {
       return 'Please select a file';
     }
-
+    
     if (file.type !== 'application/pdf') {
       return 'Only PDF files are allowed';
     }
-
-    if (file.size > 2 * 1024 * 1024) {
+    
+    if (file.size > 2 * 1024 * 1024) { // 2MB
       return 'File size exceeds 2MB limit';
     }
-
-    // Basic PDF header check
-    try {
-      const reader = new FileReader();
-      reader.readAsArrayBuffer(file.slice(0, 5));
-      return new Promise((resolve) => {
-        reader.onload = () => {
-          const arr = new Uint8Array(reader.result);
-          const header = String.fromCharCode.apply(null, arr);
-          if (header !== '%PDF-') {
-            resolve('Invalid PDF file');
-          } else {
-            resolve(null);
-          }
-        };
-        reader.onerror = () => resolve('Error reading file');
-      });
-    } catch {
-      return 'Error validating PDF';
-    }
+    
+    return null;
   };
 
   // Handle file upload
@@ -130,29 +94,28 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
     e.preventDefault();
     setError('');
     setMemoryWarning(false);
-    setUploadProgress(0);
-
+    
     if (!lectureName.trim()) {
       setError('Lecture name is required');
       toast.error('Lecture name is required');
       return;
     }
-
+    
     if (!/^[a-zA-Z0-9_-]+$/.test(lectureName)) {
-      setError('Only letters, numbers, underscores, and hyphens allowed');
+      setError('Only letters, numbers, underscores and hyphens allowed');
       toast.error('Invalid lecture name format');
       return;
     }
 
-    const fileError = await validateFile(file);
+    const fileError = validateFile(file);
     if (fileError) {
       setError(fileError);
       toast.error(fileError);
       return;
     }
-
+    
     setLoading(true);
-
+    
     try {
       const formData = new FormData();
       formData.append('lecture_name', lectureName.trim());
@@ -166,8 +129,8 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
 
       const source = axios.CancelToken.source();
       const timeout = setTimeout(() => {
-        source.cancel('Upload timed out after 60 seconds');
-      }, 60000);
+        source.cancel('Upload timed out after 2 minutes');
+      }, 120000);
 
       await axios.post(
         `${process.env.REACT_APP_API_BASE_URL}/lectures`,
@@ -175,31 +138,32 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
         {
           headers: {
             Authorization: `Bearer ${token}`,
-            'Content-Type': 'multipart/form-data',
+            'Content-Type': 'multipart/form-data'
           },
           cancelToken: source.token,
           onUploadProgress: (progressEvent) => {
             const percentCompleted = Math.round(
               (progressEvent.loaded * 100) / progressEvent.total
             );
-            setUploadProgress(percentCompleted);
             console.log(`Upload progress: ${percentCompleted}%`);
-          },
+          }
         }
       );
 
       clearTimeout(timeout);
-
+      
       const response = await axios.get(
         `${process.env.REACT_APP_API_BASE_URL}/lectures/${selectedCourse}`,
         {
           headers: { Authorization: `Bearer ${token}` },
-          timeout: 10000,
+          timeout: 10000
         }
       );
-
+      
       setLectures(response.data.lectures || []);
-      resetForm();
+      setLectureName('');
+      setFile(null);
+      
       toast.success('Lecture uploaded successfully!');
     } catch (err) {
       if (axios.isCancel(err)) {
@@ -210,17 +174,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
       }
     } finally {
       setLoading(false);
-      setUploadProgress(0);
     }
-  };
-
-  // Reset form
-  const resetForm = () => {
-    setLectureName('');
-    setFile(null);
-    setError('');
-    setMemoryWarning(false);
-    document.getElementById('file-upload').value = ''; // Clear file input
   };
 
   // Handle lecture selection
@@ -262,7 +216,8 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
             </div>
             <div className="ml-3">
               <p className="text-sm text-yellow-700">
-                The server is low on resources. Try uploading a smaller file or contact support to upgrade your plan.
+                The server is low on resources. Try uploading a smaller file or 
+                contact support to upgrade your plan.
               </p>
             </div>
           </div>
@@ -283,9 +238,9 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
           <input
             type="text"
             value={lectureName}
-            onChange={(e) => setLectureName(e.target.value.trim())}
+            onChange={(e) => setLectureName(e.target.value)}
             className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500"
-            placeholder="e.g., Introduction_to_Algorithms"
+            placeholder="e.g., Introduction to Algorithms"
             required
             pattern="[a-zA-Z0-9_-]+"
             title="Only letters, numbers, underscores, and hyphens allowed"
@@ -315,12 +270,13 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
                     className="sr-only"
                     accept="application/pdf"
                     onChange={(e) => setFile(e.target.files?.[0] || null)}
-                    disabled={loading}
                   />
                 </label>
                 <p className="pl-1">or drag and drop</p>
               </div>
-              <p className="text-xs text-gray-500">PDF up to 2MB</p>
+              <p className="text-xs text-gray-500">
+                PDF up to 2MB
+              </p>
               {file && (
                 <p className="text-sm text-gray-900 mt-2">
                   Selected: {file.name} ({(file.size / 1024 / 1024).toFixed(2)}MB)
@@ -330,63 +286,41 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
           </div>
         </div>
 
-        {uploadProgress > 0 && uploadProgress < 100 && (
-          <div className="w-full bg-gray-200 rounded-full h-2.5">
-            <div
-              className="bg-indigo-600 h-2.5 rounded-full"
-              style={{ width: `${uploadProgress}%` }}
-            ></div>
-            <p className="text-sm text-gray-600 mt-1">Upload Progress: {uploadProgress}%</p>
-          </div>
-        )}
-
-        <div className="flex space-x-4">
-          <button
-            type="submit"
-            disabled={loading}
-            className={`flex-1 bg-indigo-600 text-white py-3 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${
-              loading ? 'opacity-70 cursor-not-allowed' : ''
-            }`}
-          >
-            {loading ? (
-              <>
-                <svg
-                  className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  ></circle>
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  ></path>
-                </svg>
-                Processing...
-              </>
-            ) : (
-              'Upload Lecture'
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={resetForm}
-            disabled={loading}
-            className={`flex-1 bg-gray-300 text-gray-800 py-3 px-4 rounded-lg hover:bg-gray-400 transition duration-300 ${
-              loading ? 'opacity-70 cursor-not-allowed' : ''
-            }`}
-          >
-            Clear Form
-          </button>
-        </div>
+        <button
+          type="submit"
+          disabled={loading}
+          className={`w-full bg-indigo-600 text-white py-3 px-4 rounded-lg hover:bg-indigo-700 transition duration-300 flex items-center justify-center ${
+            loading ? 'opacity-70 cursor-not-allowed' : ''
+          }`}
+        >
+          {loading ? (
+            <>
+              <svg
+                className="animate-spin -ml-1 mr-3 h-5 w-5 text-white"
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+              >
+                <circle
+                  className="opacity-25"
+                  cx="12"
+                  cy="12"
+                  r="10"
+                  stroke="currentColor"
+                  strokeWidth="4"
+                ></circle>
+                <path
+                  className="opacity-75"
+                  fill="currentColor"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                ></path>
+              </svg>
+              Processing...
+            </>
+          ) : (
+            'Upload Lecture'
+          )}
+        </button>
       </form>
 
       <div>
