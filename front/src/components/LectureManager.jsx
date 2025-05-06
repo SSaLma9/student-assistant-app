@@ -82,8 +82,8 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
       return 'Only PDF files are allowed';
     }
     
-    if (file.size > 2 * 1024 * 1024) { // 2MB
-      return 'File size exceeds 2MB limit';
+    if (file.size > 5 * 1024 * 1024) { // 5MB
+      return 'File size exceeds 5MB limit';
     }
     
     return null;
@@ -275,7 +275,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
                 <p className="pl-1">or drag and drop</p>
               </div>
               <p className="text-xs text-gray-500">
-                PDF up to 2MB
+                PDF up to 5MB
               </p>
               {file && (
                 <p className="text-sm text-gray-900 mt-2">
@@ -312,7 +312,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
                 <path
                   className="opacity-75"
                   fill="currentColor"
-                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                  d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 3 7.938l3-2.647z"
                 ></path>
               </svg>
               Processing...
@@ -356,7 +356,7 @@ const LectureManager = ({ selectedCourse, setView, setSelectedLecture, token }) 
                 >
                   <path
                     fillRule="evenodd"
-                    d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
+                    d="M7.293 14district.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z"
                     clipRule="evenodd"
                   />
                 </svg>
