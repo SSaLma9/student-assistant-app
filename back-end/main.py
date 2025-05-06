@@ -1,7 +1,7 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form, status, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, Form, status, Request, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel
 from passlib.context import CryptContext
@@ -17,7 +17,7 @@ from PyPDF2 import PdfReader
 from PyPDF2.errors import PdfReadError
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from langchain_community.vector Regen
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
@@ -42,6 +42,15 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://student-assistant-frontend-production.up.railway.app"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Security configurations
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "hsgdter453cnhfgdt658ddlkdk*m54wq")
 ALGORITHM = "HS256"
@@ -49,15 +58,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Configuration
 USER_DATA_DIR = "/app/user_data"
@@ -233,7 +233,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"error": "Validation error", "details": details},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={
+            "Access-Control-Allow-Origin": "https://student-assistant-frontend-production.up.railway.app",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
     )
 
 @app.exception_handler(HTTPException)
@@ -241,7 +246,12 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": exc.detail},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={
+            "Access-Control-Allow-Origin": "https://student-assistant-frontend-production.up.railway.app",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
     )
 
 @app.exception_handler(MemoryError)
@@ -250,7 +260,12 @@ async def memory_error_handler(request: Request, exc: MemoryError):
     return JSONResponse(
         status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
         content={"error": "Server ran out of memory. Try a smaller file or upgrade your plan."},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={
+            "Access-Control-Allow-Origin": "https://student-assistant-frontend-production.up.railway.app",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
     )
 
 @app.exception_handler(Exception)
@@ -259,8 +274,30 @@ async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"error": f"Internal server error: {str(exc)}"},
-        headers={"Access-Control-Allow-Origin": "*"}
+        headers={
+            "Access-Control-Allow-Origin": "https://student-assistant-frontend-production.up.railway.app",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
     )
+
+# OPTIONS route handler for preflight requests
+router = APIRouter()
+
+@router.options("/{path:path}")
+async def handle_options():
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "https://student-assistant-frontend-production.up.railway.app",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
+    )
+
+app.include_router(router)
 
 # Pydantic models
 class UserCredentials(BaseModel):
@@ -444,7 +481,7 @@ async def create_lecture_db(username: str, course_name: str, lecture_name: str, 
             "file_path": file_path
         }
         await lectures_collection.insert_one(lecture)
-        logger.info(f"Lecture '{lecture_name}' created successfully")
+        logger_info(f"Lecture '{lecture_name}' created successfully")
     except DuplicateKeyError:
         logger.error(f"Duplicate lecture name: {lecture_name}")
         raise HTTPException(
@@ -521,8 +558,8 @@ async def create_faiss_index(text: str, timeout: int = 300) -> FAISS:
         check_memory_usage()
 
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=100,  # Increased chunk size for better context
-            chunk_overlap=20  # Slightly increased overlap
+            chunk_size=100,
+            chunk_overlap=20
         )
 
         chunks = text_splitter.split_text(text)
@@ -533,7 +570,7 @@ async def create_faiss_index(text: str, timeout: int = 300) -> FAISS:
             )
 
         embeddings = get_embeddings_model()
-        batch_size = 2  # Reduced batch size to lower memory usage
+        batch_size = 2
 
         async def embed_with_timeout():
             vectors = []
@@ -646,7 +683,6 @@ def validate_pdf(file_path: str) -> None:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="PDF is empty or invalid"
                 )
-            # Test text extraction on first page
             first_page = reader.pages[0]
             text = first_page.extract_text() or ""
             if not text.strip():
@@ -873,7 +909,9 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
             for idx, q in enumerate(mcqs):
                 lines = q.split('\n')
                 question_text = next((line for line in lines if re.match(r"^\d+\.\s", line)), "")
-                options = [line for line in lines if re.match(r"^[A-D]\)", line)]
+                options = [line for line in _
+
+                lines if re.match(r"^[A-D]\)", line)]
                 answer_line = next((line for line in lines if line.startswith("Answer:")), "")
                 answer = answer_line.replace("Answer:", "").strip() if answer_line else ""
                 question_id = f"mcq_{lecture_name}_{idx}"
@@ -1127,10 +1165,8 @@ async def upload_lecture(
                 detail=f"Failed to save file: {str(e)}"
             )
 
-        # Validate and process PDF
         lecture_text = await extract_text_from_pdf(temp_file_path, username, lecture_name)
 
-        # Move temporary file to final location
         try:
             os.rename(temp_file_path, lecture_path)
             logger.info(f"Renamed temporary file to: {lecture_path}")
