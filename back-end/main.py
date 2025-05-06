@@ -17,7 +17,7 @@ from PyPDF2 import PdfReader
 from PyPDF2.errors import PdfReadError
 from langchain_groq import ChatGroq
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vector Regen
+from langchain_community.vectorstores import FAISS
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain.prompts import PromptTemplate
@@ -481,7 +481,7 @@ async def create_lecture_db(username: str, course_name: str, lecture_name: str, 
             "file_path": file_path
         }
         await lectures_collection.insert_one(lecture)
-        logger_info(f"Lecture '{lecture_name}' created successfully")
+        logger.info(f"Lecture '{lecture_name}' created successfully")
     except DuplicateKeyError:
         logger.error(f"Duplicate lecture name: {lecture_name}")
         raise HTTPException(
@@ -909,9 +909,7 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
             for idx, q in enumerate(mcqs):
                 lines = q.split('\n')
                 question_text = next((line for line in lines if re.match(r"^\d+\.\s", line)), "")
-                options = [line for line in _
-
-                lines if re.match(r"^[A-D]\)", line)]
+                options = [line for line in lines if re.match(r"^[A-D]\)", line)]
                 answer_line = next((line for line in lines if line.startswith("Answer:")), "")
                 answer = answer_line.replace("Answer:", "").strip() if answer_line else ""
                 question_id = f"mcq_{lecture_name}_{idx}"
