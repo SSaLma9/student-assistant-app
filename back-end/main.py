@@ -36,7 +36,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://student-assistant-frontend-production.up.railway.app",
+        "https://student-assistant-app-frontend.vercel.app",
         "http://localhost:3000"
     ],
     allow_credentials=True,
@@ -81,7 +81,7 @@ questions_collection = None
 # CORS headers
 def get_cors_headers():
     return {
-        "Access-Control-Allow-Origin": "https://student-assistant-frontend-production.up.railway.app",
+        "Access-Control-Allow-Origin": "https://student-assistant-app-frontend.vercel.app",
         "Access-Control-Allow-Credentials": "true",
         "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
         "Access-Control-Allow-Headers": "*",
