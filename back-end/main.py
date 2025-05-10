@@ -9,21 +9,17 @@ from typing import Optional, List, Dict
 import motor.motor_asyncio
 import jwt
 import datetime
-import PyPDF2
 import os
 from dotenv import load_dotenv
-from PyPDF2 import PdfReader
-from PyPDF2.errors import PdfReadError
-from langchain_groq import ChatGroq
-from langchain.prompts import PromptTemplate
+from pypdf import PdfReader
+from pypdf.errors import PdfReadError
+from groq import Groq, APIError
 import re
 import logging
-import psutil
 import asyncio
 import aiofiles
 import tempfile
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
-from groq import Groq, APIError
 import cloudinary
 import cloudinary.uploader
 
@@ -63,7 +59,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_PDF_PAGES = 50  # Reduced page limit
-MAX_TEXT_LENGTH = 10000  # Max characters for ChatGroq input
+MAX_TEXT_LENGTH = 10000  # Max characters for Groq input
+MAX_RESPONSE_LENGTH = 5000  # Max characters for API responses
 os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 # Cloudinary configuration
@@ -103,18 +100,6 @@ def check_volume_writable():
     except (OSError, PermissionError) as e:
         logger.error(f"Volume {USER_DATA_DIR} is not writable: {str(e)}")
         return False
-
-# Check disk space
-def check_disk_space():
-    disk = psutil.disk_usage(USER_DATA_DIR)
-    if disk.percent > 85:
-        logger.error(f"Disk usage too high: {disk.percent}%")
-        raise HTTPException(
-            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-            detail="Insufficient disk space"
-        )
-    logger.debug(f"Disk usage: {disk.percent}% (Free: {disk.free/1024/1024:.2f}MB)")
-    return disk
 
 # MongoDB setup
 async def init_mongodb():
@@ -180,13 +165,6 @@ def validate_name(name: str, field: str):
             status_code=400,
             detail=f"{field} must contain only letters, numbers, underscores, or hyphens"
         )
-
-def check_memory_usage():
-    mem = psutil.virtual_memory()
-    logger.debug(f"Memory usage: {mem.percent}% (Total: {mem.total/1024/1024:.2f}MB, Available: {mem.available/1024/1024:.2f}MB)")
-    if mem.percent > 80:
-        logger.error("Memory usage exceeds 80%")
-        raise HTTPException(status_code=507, detail="Memory overloaded")
 
 def cleanup_temp_file(temp_file_path: str):
     try:
@@ -431,7 +409,6 @@ async def extract_text_from_pdf(file_path: str, timeout: int = 60) -> str:
             logger.debug(f"PDF has {total_pages} pages")
             for page_num in range(total_pages):
                 try:
-                    check_memory_usage()
                     page_text = reader.pages[page_num].extract_text() or ""
                     text.append(page_text)
                     logger.debug(f"Extracted text from page {page_num + 1} (length: {len(page_text)})")
@@ -469,90 +446,72 @@ async def upload_lecture_to_cloudinary(file_path: str, username: str, lecture_na
         raise HTTPException(status_code=500, detail="Failed to upload to Cloudinary")
 
 # Prompt templates
-EXAM_PROMPT = PromptTemplate(
-    input_variables=["text", "level", "exam_type"],
-    template="""
-    Based on the following lecture content:
-    {text}
-    Create an exam with the specified parameters.
-    Difficulty level: {level}
-    Exam type: {exam_type}
-    If Exam type is "MCQs":
-    Generate 10 Multiple Choice Questions (MCQs) with options A-D.
-    Format:
-    **MCQs**
-    1. [Question]?
-    A) [Option1]
-    B) [Option2]
-    C) [Option3]
-    D) [Option4]
-    Answer: [Letter]
-    If Exam type is "Essay Questions":
-    Generate 10 Essay Questions.
-    Format:
-    **Essay Questions**
-    1. [Essay Question]
-    """
-)
+EXAM_PROMPT = """
+Based on the following lecture content:
+{text}
+Create an exam with the specified parameters.
+Difficulty level: {level}
+Exam type: {exam_type}
+If Exam type is "MCQs":
+Generate 5 Multiple Choice Questions (MCQs) with options A-D.
+Format:
+**MCQs**
+1. [Question]?
+A) [Option1]
+B) [Option2]
+C) [Option3]
+D) [Option4]
+Answer: [Letter]
+If Exam type is "Essay Questions":
+Generate 5 Essay Questions.
+Format:
+**Essay Questions**
+1. [Essay Question]
+"""
 
-GRADING_PROMPT = PromptTemplate(
-    input_variables=["question", "answer", "correct_answer"],
-    template="""
-    You are a helpful and educational Student Assistant.
-    Question: {question}
-    Correct Answer: {correct_answer}
-    Student's Answer: {answer}
-    Please evaluate the student's answer and provide:
-    1. A score out of 10
-    2. Detailed feedback with examples or direct explanations of what was good and what could be improved
-    3. The correct answer or approach
-    Your response should be encouraging and educational with examples to help understand.
-    """
-)
+GRADING_PROMPT = """
+You are a helpful and educational Student Assistant.
+Question: {question}
+Correct Answer: {correct_answer}
+Student's Answer: {answer}
+Please evaluate the student's answer and provide:
+1. A score out of 10
+2. Detailed feedback with examples or direct explanations of what was good and what could be improved
+3. The correct answer or approach
+Your response should be encouraging and educational with examples to help understand.
+"""
 
 STUDY_PROMPTS = {
-    "Summarize": PromptTemplate(
-        input_variables=["text"],
-        template="""
-        Based on the following lecture content:
-        {text}
-        Create a comprehensive summary.
-        Include all key concepts and important points.
-        Use clear examples to explain difficult concepts.
-        Provide the summary in a well-structured format with headings, bullet points, and examples.
-        """
-    ),
-    "Explain": PromptTemplate(
-        input_variables=["text"],
-        template="""
-        Based on the following lecture content:
-        {text}
-        Explain the content in detail. Break down all complex concepts
-        and provide simple explanations with examples.
-        Your explanation should be easy to understand for a student. Use analogies and examples
-        where appropriate to clarify difficult concepts.
-        """
-    ),
-    "Examples": PromptTemplate(
-        input_variables=["text"],
-        template="""
-        Based on the following lecture content:
-        {text}
-        Create practical examples.
-        Provide at least 5 different examples that illustrate the concepts.
-        Each example should demonstrate a different aspect of the material.
-        """
-    ),
-    "Custom Question": PromptTemplate(
-        input_variables=["text", "question"],
-        template="""
-        Based on the following lecture content:
-        {text}
-        Answer this specific question:
-        {question}
-        Provide a thorough answer with examples and explanations.
-        """
-    )
+    "Summarize": """
+    Based on the following lecture content:
+    {text}
+    Create a comprehensive summary.
+    Include all key concepts and important points.
+    Use clear examples to explain difficult concepts.
+    Provide the summary in a well-structured format with headings, bullet points, and examples.
+    """,
+    "Explain": """
+    Based on the following lecture content:
+    {text}
+    Explain the content in detail. Break down all complex concepts
+    and provide simple explanations with examples.
+    Your explanation should be easy to understand for a student. Use analogies and examples
+    where appropriate to clarify difficult concepts.
+    """,
+    "Examples": """
+    Based on the following lecture content:
+    {text}
+    Create practical examples.
+    Provide at least 5 different examples that illustrate the concepts.
+    Each example should demonstrate a different aspect of the material.
+    """,
+    "Custom Question": """
+    Based on the following lecture content:
+    {text}
+    Answer this specific question:
+    {question}
+    Provide a thorough answer with examples and explanations.
+    """
 }
 
 async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[Dict]:
@@ -601,7 +560,7 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
                 essays.append('\n'.join(current_question))
         flattened = []
         if exam_type == "MCQs":
-            for idx, q in enumerate(mcqs):
+            for idx, q in enumerate(mcqs[:5]):  # Limit to 5 questions
                 lines = q.split('\n')
                 question_text = next((line for line in lines if re.match(r"^\d+\.\s", line)), "")
                 options = [line for line in lines if re.match(r"^[A-D]\)", line)]
@@ -619,7 +578,7 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
                 flattened.append(question)
                 await questions_collection.update_one({"id": question_id}, {"$set": question}, upsert=True)
         elif exam_type == "Essay Questions":
-            for idx, q in enumerate(essays):
+            for idx, q in enumerate(essays[:5]):  # Limit to 5 questions
                 question_id = f"essay_{lecture_name}_{idx}"
                 question = {
                     "id": question_id,
@@ -637,8 +596,8 @@ async def parse_exam(exam_text: str, exam_type: str, lecture_name: str) -> List[
         logger.error(f"Exam parsing error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Could not parse exam")
 
-# Initialize ChatGroq
-def get_chat_model():
+# Initialize Groq client
+def get_groq_client():
     try:
         if not GROQ_API_KEY:
             logger.error("GROQ_API_KEY not set in environment")
@@ -668,19 +627,12 @@ def get_chat_model():
             logger.error(f"Environment GROQ_API_KEY mismatch. Loaded: {stripped_key[:5]}..., Runtime: {runtime_key[:5]}...")
             raise HTTPException(status_code=500, detail="GROQ_API_KEY environment mismatch")
         
-        chat_model = ChatGroq(
-            temperature=0.7,
-            groq_api_key=stripped_key,
-            model_name="llama3-70b-8192",
-            max_tokens=256
-        )
-        logger.debug("ChatGroq initialized successfully")
-        return chat_model
+        return client
     except APIError as e:
-        logger.error(f"ChatGroq API error: {str(e)}. Response: {getattr(e, 'response', 'No response')}")
+        logger.error(f"Groq API error: {str(e)}. Response: {getattr(e, 'response', 'No response')}")
         raise HTTPException(status_code=503, detail=f"AI service error: {str(e)}")
     except Exception as e:
-        logger.error(f"Failed to initialize ChatGroq: {str(e)}", exc_info=True)
+        logger.error(f"Failed to initialize Groq client: {str(e)}", exc_info=True)
         raise HTTPException(status_code=503, detail="AI service unavailable")
 
 # API Endpoints
@@ -788,8 +740,6 @@ async def upload_lecture(
     temp_file_path = None
 
     try:
-        check_memory_usage()
-        check_disk_space()
         if not check_volume_writable():
             raise HTTPException(status_code=500, detail="Storage not writable")
 
@@ -883,9 +833,8 @@ async def generate_study_content(request: StudyRequest, username: str = Depends(
         if request.task == "Custom Question" and not request.question:
             logger.error("Custom Question task requires a question")
             raise HTTPException(status_code=400, detail="Question required")
-        
-        check_memory_usage()
-        chat_model = get_chat_model()
+
+        groq_client = get_groq_client()
         prompt_text = STUDY_PROMPTS[request.task].format(
             text=lecture["lecture_text"],
             question=request.question or ""
@@ -894,20 +843,26 @@ async def generate_study_content(request: StudyRequest, username: str = Depends(
         
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(chat_model.invoke, prompt_text),
+                asyncio.to_thread(
+                    groq_client.chat.completions.create,
+                    model="llama3-70b-8192",
+                    messages=[{"role": "user", "content": prompt_text}],
+                    max_tokens=256,
+                    temperature=0.7
+                ),
                 timeout=30
             )
-            content = response.content
+            content = response.choices[0].message.content[:MAX_RESPONSE_LENGTH]  # Truncate response
             logger.info(f"Study content generated for {username}/{request.lecture_name}/{request.task}")
             return JSONResponse(
                 content={"content": content},
                 headers=get_cors_headers()
             )
         except asyncio.TimeoutError:
-            logger.error(f"ChatGroq timed out for {request.task}")
+            logger.error(f"Groq API timed out for {request.task}")
             raise HTTPException(status_code=504, detail="AI processing timed out")
         except APIError as e:
-            logger.error(f"ChatGroq API error for {request.task}: {str(e)}")
+            logger.error(f"Groq API error for {request.task}: {str(e)}")
             raise HTTPException(status_code=503, detail=f"AI service error: {str(e)}")
     except HTTPException as he:
         raise he
@@ -926,9 +881,8 @@ async def generate_exam(request: ExamRequest, username: str = Depends(get_curren
         if not lecture.get("lecture_text"):
             logger.error(f"No text found for lecture {request.lecture_name}")
             raise HTTPException(status_code=400, detail="No lecture text available")
-        
-        check_memory_usage()
-        chat_model = get_chat_model()
+
+        groq_client = get_groq_client()
         prompt_text = EXAM_PROMPT.format(
             text=lecture["lecture_text"],
             level=request.difficulty,
@@ -938,20 +892,26 @@ async def generate_exam(request: ExamRequest, username: str = Depends(get_curren
         
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(chat_model.invoke, prompt_text),
+                asyncio.to_thread(
+                    groq_client.chat.completions.create,
+                    model="llama3-70b-8192",
+                    messages=[{"role": "user", "content": prompt_text}],
+                    max_tokens=256,
+                    temperature=0.7
+                ),
                 timeout=30
             )
-            questions = await parse_exam(response.content, request.exam_type, request.lecture_name)
+            questions = await parse_exam(response.choices[0].message.content, request.exam_type, request.lecture_name)
             logger.info(f"Exam generated for {username}/{request.lecture_name}/{request.exam_type}")
             return JSONResponse(
                 content={"questions": questions},
                 headers=get_cors_headers()
             )
         except asyncio.TimeoutError:
-            logger.error(f"ChatGroq timed out for exam generation")
+            logger.error(f"Groq API timed out for exam generation")
             raise HTTPException(status_code=504, detail="AI processing timed out")
         except APIError as e:
-            logger.error(f"ChatGroq API error for exam: {str(e)}")
+            logger.error(f"Groq API error for exam: {str(e)}")
             raise HTTPException(status_code=503, detail=f"AI service error: {str(e)}")
     except HTTPException as he:
         raise he
@@ -967,9 +927,8 @@ async def grade_answer_endpoint(answer: AnswerSubmit, username: str = Depends(ge
         if not question:
             logger.error(f"Question {answer.question_id} not found")
             raise HTTPException(status_code=404, detail="Question not found")
-        
-        check_memory_usage()
-        chat_model = get_chat_model()
+
+        groq_client = get_groq_client()
         prompt_text = GRADING_PROMPT.format(
             question=question["question"],
             answer=answer.answer,
@@ -979,19 +938,26 @@ async def grade_answer_endpoint(answer: AnswerSubmit, username: str = Depends(ge
         
         try:
             response = await asyncio.wait_for(
-                asyncio.to_thread(chat_model.invoke, prompt_text),
+                asyncio.to_thread(
+                    groq_client.chat.completions.create,
+                    model="llama3-70b-8192",
+                    messages=[{"role": "user", "content": prompt_text}],
+                    max_tokens=256,
+                    temperature=0.7
+                ),
                 timeout=30
             )
+            feedback = response.choices[0].message.content[:MAX_RESPONSE_LENGTH]  # Truncate response
             logger.info(f"Answer graded for {username}/{question['lecture_name']}/{answer.question_id}")
             return JSONResponse(
-                content={"feedback": response.content},
+                content={"feedback": feedback},
                 headers=get_cors_headers()
             )
         except asyncio.TimeoutError:
-            logger.error("ChatGroq timed out for grading")
+            logger.error("Groq API timed out for grading")
             raise HTTPException(status_code=504, detail="AI processing timed out")
         except APIError as e:
-            logger.error(f"ChatGroq API error for grading: {str(e)}")
+            logger.error(f"Groq API error for grading: {str(e)}")
             raise HTTPException(status_code=503, detail=f"AI service error: {str(e)}")
     except HTTPException as he:
         raise he
@@ -1006,16 +972,12 @@ async def health_check():
             await client.admin.command('ping')
         else:
             raise HTTPException(status_code=500, detail="MongoDB not initialized")
-        mem = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
         volume_writable = check_volume_writable()
         logger.info("Health check completed")
         return JSONResponse(
             content={
                 "status": "healthy" if volume_writable else "unhealthy",
                 "mongodb": "connected" if client else "disconnected",
-                "memory_percent": mem.percent,
-                "disk_percent": disk.percent,
                 "volume_writable": volume_writable
             },
             headers=get_cors_headers()
@@ -1023,36 +985,6 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Health check failed")
-
-@app.get("/resources")
-async def resource_check():
-    try:
-        mem = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        volume_writable = check_volume_writable()
-        logger.info("Resource check completed")
-        return JSONResponse(
-            content={
-                "memory": {
-                    "total": f"{mem.total/1024/1024:.2f} MB",
-                    "available": f"{mem.available/1024/1024:.2f} MB",
-                    "used": f"{mem.used/1024/1024:.2f} MB",
-                    "percent": mem.percent
-                },
-                "disk": {
-                    "total": f"{disk.total/1024/1024:.2f} MB",
-                    "free": f"{disk.free/1024/1024:.2f} MB",
-                    "used": f"{disk.used/1024/1024:.2f} MB",
-                    "percent": disk.percent
-                },
-                "volume_writable": volume_writable,
-                "status": "ok" if mem.percent < 80 and disk.percent < 85 and volume_writable else "warning"
-            },
-            headers=get_cors_headers()
-        )
-    except Exception as e:
-        logger.error(f"Resource check error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Resource check failed")
 
 if __name__ == "__main__":
     import uvicorn
