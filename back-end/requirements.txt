@@ -8,3 +8,4 @@ groq
 aiofiles
 uvicorn
 cloudinary
+PyJWT
