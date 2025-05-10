@@ -9,3 +9,6 @@ aiofiles
 uvicorn
 cloudinary
 PyJWT
+python-multipart
+bcrypt>=4.0.1,<4.1.0
+passlib[bcrypt]>=1.7.4,<2.0.0
