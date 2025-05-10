@@ -734,32 +734,30 @@ async def register(credentials: UserCredentials):
     except Exception as e:
         logger.error(f"Registration error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Registration failed")
-
+        
 @app.post("/login", response_model=dict)
 async def login(credentials: UserCredentials):
     try:
         if not client:
             raise HTTPException(status_code=503, detail="Database not initialized")
-            
         if not credentials.username or not credentials.password:
             raise HTTPException(status_code=400, detail="Username and password required")
-            
         user = await users_collection.find_one({"username": credentials.username})
         if not user:
             logger.warning(f"Login attempt for non-existent user: {credentials.username}")
             raise HTTPException(status_code=401, detail="Invalid credentials")
-            
         if not verify_password(credentials.password, user["hashed_password"]):
             logger.warning(f"Invalid password for user: {credentials.username}")
             raise HTTPException(status_code=401, detail="Invalid credentials")
-            
         access_token = create_access_token(
             data={"sub": credentials.username},
             expires_delta=datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
         logger.info(f"User {credentials.username} logged in successfully")
-        return {"token": access_token}
-        
+        return JSONResponse(
+            content={"token": access_token},
+            headers=get_cors_headers()
+        )
     except HTTPException as he:
         raise he
     except Exception as e:
