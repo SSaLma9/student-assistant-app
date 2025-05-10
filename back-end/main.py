@@ -100,60 +100,138 @@ def check_volume_writable():
         logger.error(f"Volume {USER_DATA_DIR} is not writable: {str(e)}")
         return False
 
+def verify_environment_variables():
+    required_vars = [
+        "MONGODB_URI",
+        "JWT_SECRET_KEY",
+        "GROQ_API_KEY",
+        "CLOUDINARY_CLOUD_NAME",
+        "CLOUDINARY_API_KEY",
+        "CLOUDINARY_API_SECRET"
+    ]
+    
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    if missing_vars:
+        logger.error(f"Missing environment variables: {', '.join(missing_vars)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Missing required environment variables: {', '.join(missing_vars)}"
+        )
+
 # MongoDB setup
 async def init_mongodb():
     if not MONGODB_URI:
         logger.error("MONGODB_URI not set")
         raise HTTPException(status_code=500, detail="MONGODB_URI not configured")
+    
     max_retries = 5
     retry_delay = 3
+    
     for attempt in range(max_retries):
         try:
             client = motor.motor_asyncio.AsyncIOMotorClient(
-                MONGODB_URI, serverSelectionTimeoutMS=5000
+                MONGODB_URI,
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=10000,
+                socketTimeoutMS=30000
             )
+            
             await client.admin.command('ping')
             logger.info("MongoDB connected successfully")
+            
+            db = client.student_assistant
+            await db.command('ping')
+            logger.info("Database access verified")
+            
             return client
+            
         except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+            logger.warning(f"MongoDB connection attempt {attempt + 1} failed: {str(e)}")
             if attempt == max_retries - 1:
-                logger.error(f"MongoDB connection failed after {max_retries} attempts: {str(e)}")
+                logger.error(f"MongoDB connection failed after {max_retries} attempts")
                 raise HTTPException(status_code=503, detail="MongoDB connection failed")
-            logger.warning(f"MongoDB connection attempt {attempt + 1} failed: {str(e)}. Retrying in {retry_delay}s...")
             await asyncio.sleep(retry_delay)
             retry_delay *= 2
+        except Exception as e:
+            logger.error(f"Unexpected MongoDB connection error: {str(e)}")
+            raise HTTPException(status_code=500, detail="Database initialization failed")
 
 # Startup event
 @app.on_event("startup")
 async def startup_event():
     global client, db, users_collection, courses_collection, lectures_collection, questions_collection
+    
     try:
+        verify_environment_variables()
+        
+        # Initialize MongoDB connection
         client = await init_mongodb()
+        if not client:
+            raise Exception("Failed to initialize MongoDB client")
+            
         db = client.student_assistant
         users_collection = db.users
         courses_collection = db.courses
         lectures_collection = db.lectures
         questions_collection = db.questions
-        logger.info("MongoDB collections initialized")
         
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                await users_collection.create_index("username", unique=True)
-                await courses_collection.create_index([("username", 1), ("course_name", 1)], unique=True)
-                await lectures_collection.create_index([("username", 1), ("course_name", 1), ("lecture_name", 1)], unique=True)
-                await questions_collection.create_index("id", unique=True)
-                logger.info("MongoDB indexes created")
-                break
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Index creation failed after {max_retries} attempts: {str(e)}")
-                    raise HTTPException(status_code=500, detail="Index creation failed")
-                logger.warning(f"Index creation attempt {attempt + 1} failed. Retrying...")
-                await asyncio.sleep(3)
+        # Test collection access
+        try:
+            await users_collection.find_one()
+            logger.info("Database collections initialized successfully")
+        except Exception as e:
+            logger.error(f"Database access test failed: {str(e)}")
+            raise Exception("Database connection test failed")
+        
+        # Create indexes
+        try:
+            await asyncio.gather(
+                users_collection.create_index("username", unique=True),
+                courses_collection.create_index([("username", 1), ("course_name", 1)], unique=True),
+                lectures_collection.create_index([("username", 1), ("course_name", 1), ("lecture_name", 1)], unique=True),
+                questions_collection.create_index("id", unique=True)
+            )
+            logger.info("Database indexes created successfully")
+        except Exception as e:
+            logger.error(f"Index creation failed: {str(e)}")
+            # Don't fail startup for index issues
+            
     except Exception as e:
-        logger.error(f"MongoDB initialization failed: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="MongoDB initialization failed")
+        logger.error(f"Startup failed: {str(e)}", exc_info=True)
+        raise
+
+# Root endpoint
+@app.get("/")
+async def root():
+    return {
+        "message": "Student Assistant API is running",
+        "status": "healthy",
+        "endpoints": {
+            "login": "POST /login",
+            "register": "POST /register",
+            "courses": "GET /courses",
+            "lectures": "GET /lectures/{course_name}"
+        }
+    }
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    try:
+        if client:
+            await client.admin.command('ping')
+            db_status = "connected"
+        else:
+            db_status = "disconnected"
+            
+        return {
+            "status": "healthy",
+            "database": db_status,
+            "timestamp": datetime.datetime.utcnow().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        raise HTTPException(status_code=503, detail="Service unavailable")
 
 # Input validation
 NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -659,21 +737,29 @@ async def register(credentials: UserCredentials):
 
 @app.post("/login", response_model=dict)
 async def login(credentials: UserCredentials):
-    if not credentials.username or not credentials.password:
-        raise HTTPException(status_code=400, detail="Username and password required")
     try:
-        user = await get_user(credentials.username)
-        if not user or not verify_password(credentials.password, user["hashed_password"]):
+        if not client:
+            raise HTTPException(status_code=503, detail="Database not initialized")
+            
+        if not credentials.username or not credentials.password:
+            raise HTTPException(status_code=400, detail="Username and password required")
+            
+        user = await users_collection.find_one({"username": credentials.username})
+        if not user:
+            logger.warning(f"Login attempt for non-existent user: {credentials.username}")
             raise HTTPException(status_code=401, detail="Invalid credentials")
+            
+        if not verify_password(credentials.password, user["hashed_password"]):
+            logger.warning(f"Invalid password for user: {credentials.username}")
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+            
         access_token = create_access_token(
             data={"sub": credentials.username},
             expires_delta=datetime.timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
         logger.info(f"User {credentials.username} logged in successfully")
-        return JSONResponse(
-            content={"token": access_token},
-            headers=get_cors_headers()
-        )
+        return {"token": access_token}
+        
     except HTTPException as he:
         raise he
     except Exception as e:
