@@ -17,3 +17,4 @@ psutil
 bcrypt
 huggingface-hub[hf_xet]
 aiofiles
+cloudinary
