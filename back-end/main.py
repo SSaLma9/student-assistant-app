@@ -24,6 +24,8 @@ import aiofiles
 import tempfile
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, DuplicateKeyError
 from groq import Groq, APIError
+import cloudinary
+import cloudinary.uploader
 
 # Load environment variables
 load_dotenv()
@@ -56,13 +58,20 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Configuration
-USER_DATA_DIR = "/app/user_data"
+USER_DATA_DIR = "/tmp"  # Use /tmp for temporary files on Vercel
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MONGODB_URI = os.getenv("MONGODB_URI")
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 MAX_PDF_PAGES = 50  # Reduced page limit
 MAX_TEXT_LENGTH = 10000  # Max characters for ChatGroq input
 os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+# Cloudinary configuration
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
 
 # MongoDB client
 client = None
@@ -179,11 +188,11 @@ def check_memory_usage():
         logger.error("Memory usage exceeds 80%")
         raise HTTPException(status_code=507, detail="Memory overloaded")
 
-def cleanup_lecture_files(lecture_path: str):
+def cleanup_temp_file(temp_file_path: str):
     try:
-        if lecture_path and os.path.exists(lecture_path):
-            os.remove(lecture_path)
-            logger.debug(f"Removed lecture file: {lecture_path}")
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+            logger.debug(f"Removed temp file: {temp_file_path}")
     except Exception as e:
         logger.error(f"Cleanup failed: {str(e)}")
 
@@ -330,7 +339,7 @@ async def get_user_lectures(username: str, course_name: str) -> List[Dict]:
         logger.error(f"Error fetching lectures for {username}/{course_name}: {str(e)}")
         raise HTTPException(status_code=500, detail="Could not fetch lectures")
 
-async def create_lecture_db(username: str, course_name: str, lecture_name: str, file_path: str, lecture_text: str):
+async def create_lecture_db(username: str, course_name: str, lecture_name: str, file_url: str, lecture_text: str):
     if lectures_collection is None:
         logger.error("Lectures collection not initialized")
         raise HTTPException(status_code=503, detail="Database not initialized")
@@ -342,7 +351,7 @@ async def create_lecture_db(username: str, course_name: str, lecture_name: str, 
             "username": username,
             "course_name": course_name,
             "lecture_name": lecture_name,
-            "file_path": file_path,
+            "file_path": file_url,
             "lecture_text": lecture_text[:MAX_TEXT_LENGTH]  # Truncate text
         }
         await lectures_collection.insert_one(lecture)
@@ -442,6 +451,22 @@ async def extract_text_from_pdf(file_path: str, timeout: int = 60) -> str:
     except Exception as e:
         logger.error(f"PDF processing error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="PDF processing failed")
+
+async def upload_lecture_to_cloudinary(file_path: str, username: str, lecture_name: str) -> str:
+    try:
+        public_id = f"{username}/lectures/{lecture_name}"
+        response = cloudinary.uploader.upload(
+            file_path,
+            public_id=public_id,
+            resource_type="raw",
+            format="pdf"
+        )
+        file_url = response['secure_url']
+        logger.info(f"Uploaded {lecture_name} to Cloudinary: {file_url}")
+        return file_url
+    except Exception as e:
+        logger.error(f"Cloudinary upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to upload to Cloudinary")
 
 # Prompt templates
 EXAM_PROMPT = PromptTemplate(
@@ -619,7 +644,6 @@ def get_chat_model():
             logger.error("GROQ_API_KEY not set in environment")
             raise HTTPException(status_code=500, detail="GROQ_API_KEY not configured")
         
-        # Validate key format
         stripped_key = GROQ_API_KEY.strip()
         if not stripped_key.startswith("gsk_") or len(stripped_key) < 20:
             logger.error(f"Invalid GROQ_API_KEY format: {stripped_key[:5]}...")
@@ -627,7 +651,6 @@ def get_chat_model():
         
         logger.debug(f"Attempting to use GROQ_API_KEY: {stripped_key[:5]}...{stripped_key[-5:]}")
         
-        # Test API key with minimal request
         client = Groq(api_key=stripped_key)
         try:
             response = client.chat.completions.create(
@@ -640,7 +663,6 @@ def get_chat_model():
             logger.error(f"GROQ_API_KEY validation failed: {str(e)}. Response: {getattr(e, 'response', 'No response')}")
             raise HTTPException(status_code=503, detail=f"Invalid GROQ_API_KEY: {str(e)}")
         
-        # Revalidate environment to catch runtime changes
         runtime_key = os.getenv("GROQ_API_KEY", "").strip()
         if runtime_key != stripped_key:
             logger.error(f"Environment GROQ_API_KEY mismatch. Loaded: {stripped_key[:5]}..., Runtime: {runtime_key[:5]}...")
@@ -763,7 +785,6 @@ async def upload_lecture(
     username: str = Depends(get_current_user)
 ):
     logger.info(f"Upload request: lecture={lecture_name}, course={course_name}, file={file.filename}, size={file.size}")
-    lecture_path = os.path.join(USER_DATA_DIR, username, "lectures", f"{lecture_name}.pdf")
     temp_file_path = None
 
     try:
@@ -790,8 +811,7 @@ async def upload_lecture(
         if await lectures_collection.find_one({"username": username, "course_name": course_name, "lecture_name": lecture_name}):
             raise HTTPException(status_code=400, detail="Lecture exists")
 
-        os.makedirs(os.path.dirname(lecture_path), exist_ok=True)
-        with tempfile.NamedTemporaryFile(delete=False, dir=os.path.dirname(lecture_path), suffix=".pdf") as temp_file:
+        with tempfile.NamedTemporaryFile(delete=False, dir=USER_DATA_DIR, suffix=".pdf") as temp_file:
             temp_file_path = temp_file.name
             logger.debug(f"Saving temp PDF: {temp_file_path}")
             async with aiofiles.open(temp_file_path, 'wb') as f:
@@ -803,9 +823,9 @@ async def upload_lecture(
                     await f.write(chunk)
 
         lecture_text = await extract_text_from_pdf(temp_file_path)
-        os.rename(temp_file_path, lecture_path)
-        logger.debug(f"Renamed temp file to: {lecture_path}")
-        await create_lecture_db(username, course_name, lecture_name, lecture_path, lecture_text)
+        file_url = await upload_lecture_to_cloudinary(temp_file_path, username, lecture_name)
+        cleanup_temp_file(temp_file_path)
+        await create_lecture_db(username, course_name, lecture_name, file_url, lecture_text)
         logger.info(f"Lecture '{lecture_name}' uploaded successfully for {username}/{course_name}")
         response = JSONResponse(
             content={"message": f"Lecture '{lecture_name}' uploaded"},
@@ -815,22 +835,22 @@ async def upload_lecture(
         return response
     except HTTPException as he:
         if temp_file_path and os.path.exists(temp_file_path):
-            cleanup_lecture_files(temp_file_path)
+            cleanup_temp_file(temp_file_path)
         raise he
     except MemoryError:
         if temp_file_path and os.path.exists(temp_file_path):
-            cleanup_lecture_files(temp_file_path)
+            cleanup_temp_file(temp_file_path)
         logger.error("Memory error during upload")
         raise HTTPException(status_code=507, detail="Out of memory. Try a smaller file.")
     except OSError as e:
         logger.error(f"File operation error: {str(e)}")
         if temp_file_path and os.path.exists(temp_file_path):
-            cleanup_lecture_files(temp_file_path)
+            cleanup_temp_file(temp_file_path)
         raise HTTPException(status_code=500, detail="File operation failed")
     except Exception as e:
         logger.error(f"Upload error: {str(e)}", exc_info=True)
         if temp_file_path and os.path.exists(temp_file_path):
-            cleanup_lecture_files(temp_file_path)
+            cleanup_temp_file(temp_file_path)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.get("/lectures/{course_name}", response_model=dict)
