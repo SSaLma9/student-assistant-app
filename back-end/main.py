@@ -37,6 +37,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://student-assistant-app-frontend.vercel.app",
+        "https://student-assistant-app.vercel.app",
+        ""https://student-assistant-app-git-main-salmas-projects-06590f41.vercel.app""
         "http://localhost:3000"
     ],
     allow_credentials=True,
